@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyBus-GPT | Votre Assistant Intelligent</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { 
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #fce7f3 0%, #ddd6fe 50%, #e0e7ff 100%);
+            min-height: 100vh;
+        }
+        
+        /* Animations douces */
+        * {
+            transition: all 0.3s ease;
+        }
+        
+        /* Onglets personnalisés */
+        .tab-active { 
+            background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%);
+            color: white;
+            font-weight: 600;
+            box-shadow: 0 4px 15px rgba(236, 72, 153, 0.3);
+            transform: scale(1.05);
+        }
+        
+        .tab-inactive { 
+            background-color: rgba(255, 255, 255, 0.7);
+            color: #6b7280;
+            backdrop-filter: blur(10px);
+        }
+        
+        .tab-inactive:hover {
+            background-color: rgba(255, 255, 255, 0.9);
+            transform: scale(1.02);
+        }
+        
+        /* Panneaux de contenu */
+        .content-panel { 
+            display: none;
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        
+        .content-panel.active { 
+            display: block;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Scrollbar personnalisée */
+        #chat-output::-webkit-scrollbar { 
+            width: 10px; 
+        }
+        
+        #chat-output::-webkit-scrollbar-track { 
+            background: #f3f4f6;
+            border-radius: 10px;
+        }
+        
+        #chat-output::-webkit-scrollbar-thumb { 
+            background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%);
+            border-radius: 10px;
+        }
+        
+        /* Boutons principaux */
+        .btn-primary {
+            background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%);
+            color: white;
+            font-weight: 600;
+            padding: 12px 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(236, 72, 153, 0.3);
+            transform: translateY(0);
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(236, 72, 153, 0.4);
+        }
+        
+        .btn-primary:active {
+            transform: translateY(0);
+        }
+        
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        /* Boutons secondaires */
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.9);
+            color: #8b5cf6;
+            font-weight: 600;
+            padding: 12px 24px;
+            border-radius: 12px;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+            position: relative;
+        }
+        
+        .btn-secondary::before {
+            content: '';
+            position: absolute;
+            inset: -2px;
+            border-radius: 12px;
+            padding: 2px;
+            background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%);
+            -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            -webkit-mask-composite: xor;
+            mask-composite: exclude;
+        }
+        
+        .btn-secondary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(139, 92, 246, 0.3);
+        }
+        
+        /* Champs de saisie */
+        .input-field {
+            border: 2px solid #e5e7eb;
+            background-color: rgba(255, 255, 255, 0.9);
+            border-radius: 12px;
+            padding: 12px 16px;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+        
+        .input-field:focus {
+            outline: none;
+            border-color: #ec4899;
+            box-shadow: 0 0 0 3px rgba(236, 72, 153, 0.1);
+            background-color: white;
+        }
+        
+        /* Messages de chat */
+        .message-user {
+            background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%);
+            color: white;
+            padding: 12px 18px;
+            border-radius: 18px 18px 4px 18px;
+            max-width: 80%;
+            word-wrap: break-word;
+            box-shadow: 0 2px 10px rgba(236, 72, 153, 0.3);
+        }
+        
+        .message-ai {
+            background: rgba(255, 255, 255, 0.9);
+            color: #374151;
+            padding: 12px 18px;
+            border-radius: 18px 18px 18px 4px;
+            max-width: 80%;
+            word-wrap: break-word;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        
+        /* Animation de chargement */
+        .loading-dots {
+            display: inline-flex;
+            gap: 4px;
+        }
+        
+        .loading-dots span {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%);
+            animation: bounce 1.4s ease-in-out infinite;
+        }
+        
+        .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+        .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+        .loading-dots span:nth-child(3) { animation-delay: 0; }
+        
+        @keyframes bounce {
+            0%, 80%, 100% { transform: scale(0.8); opacity: 0.5; }
+            40% { transform: scale(1.2); opacity: 1; }
+        }
+        
+        /* Cartes de quiz */
+        .quiz-card {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            margin-bottom: 16px;
+            border: 2px solid transparent;
+            transition: all 0.3s ease;
+        }
+        
+        .quiz-card:hover {
+            border-color: #ec4899;
+            transform: translateY(-2px);
+        }
+        
+        /* Options de quiz */
+        .quiz-option {
+            background: rgba(249, 250, 251, 0.8);
+            border: 2px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 12px 16px;
+            margin: 8px 0;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .quiz-option:hover {
+            border-color: #ec4899;
+            background: rgba(252, 231, 243, 0.5);
+            transform: translateX(4px);
+        }
+        
+        .quiz-option input[type="radio"]:checked + span {
+            font-weight: 600;
+            color: #8b5cf6;
+        }
+        
+        /* Résultats */
+        .result-correct {
+            background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+            border-left: 4px solid #10b981;
+        }
+        
+        .result-incorrect {
+            background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+            border-left: 4px solid #ef4444;
+        }
+        
+        /* Tooltip d'aide */
+        .tooltip {
+            position: relative;
+            display: inline-block;
+        }
+        
+        .tooltip .tooltiptext {
+            visibility: hidden;
+            width: 200px;
+            background-color: #374151;
+            color: #fff;
+            text-align: center;
+            border-radius: 8px;
+            padding: 8px 12px;
+            position: absolute;
+            z-index: 1;
+            bottom: 125%;
+            left: 50%;
+            margin-left: -100px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            font-size: 14px;
+        }
+        
+        .tooltip:hover .tooltiptext {
+            visibility: visible;
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mx-auto p-4 lg:p-8 max-w-5xl">
+        <!-- En-tête amélioré -->
+        <header class="text-center mb-10">
+            <h1 class="text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-violet-600 mb-3">
+                MyBus-GPT
+            </h1>
+            <p class="text-gray-600 text-lg">
+                🤖 Votre assistant intelligent pour tout savoir sur MyBus
+            </p>
+            <div class="mt-4 flex justify-center gap-4 text-sm text-gray-500">
+                <span class="flex items-center gap-1">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"></path>
+                    </svg>
+                    Discutez en temps réel
+                </span>
+                <span class="flex items-center gap-1">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    Testez vos connaissances
+                </span>
+            </div>
+        </header>
+
+        <main class="bg-white/80 backdrop-blur-lg p-8 rounded-3xl shadow-2xl relative">
+            <!-- Système d'onglets amélioré -->
+            <div class="mb-8 p-1.5 bg-gray-100 rounded-2xl flex gap-2">
+                <button id="tab-chat" class="flex-1 py-3 px-6 rounded-xl transition-all duration-300 tab-active flex items-center justify-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                    </svg>
+                    Discuter
+                </button>
+                <button id="tab-quiz" class="flex-1 py-3 px-6 rounded-xl transition-all duration-300 tab-inactive flex items-center justify-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path>
+                    </svg>
+                    Quiz
+                </button>
+            </div>
+
+            <!-- Panneau de Chat amélioré -->
+            <div id="panel-chat" class="content-panel active">
+                <div class="bg-gradient-to-r from-pink-50 to-purple-50 rounded-2xl p-4 mb-6">
+                    <p class="text-gray-600 text-sm">
+                        💡 <strong>Astuce :</strong> Posez des questions précises pour obtenir les meilleures réponses. 
+                        Essayez "Quelles sont les fonctionnalités principales ?" ou "Comment fonctionne la réservation ?"
+                    </p>
+                </div>
+                
+                <div id="chat-output" class="h-[450px] mb-6 bg-gray-50 rounded-2xl p-6 overflow-y-auto space-y-4">
+                    <!-- Les messages apparaîtront ici -->
+                </div>
+                
+                <div class="flex gap-3">
+                    <div class="flex-grow relative">
+                        <input 
+                            type="text" 
+                            id="user-question" 
+                            class="input-field w-full pr-12" 
+                            placeholder="Tapez votre question ici..."
+                            autocomplete="off"
+                        >
+                        <div class="absolute right-3 top-1/2 transform -translate-y-1/2 tooltip">
+                            <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                            <span class="tooltiptext">Appuyez sur Entrée pour envoyer</span>
+                        </div>
+                    </div>
+                    <button id="ask-btn" class="btn-primary flex items-center gap-2">
+                        <span>Envoyer</span>
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Panneau de Quiz amélioré -->
+            <div id="panel-quiz" class="content-panel">
+                <div class="space-y-6">
+                    <!-- Carte de génération de quiz thématique -->
+                    <div class="quiz-card">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                            <svg class="w-6 h-6 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path>
+                            </svg>
+                            Quiz personnalisé
+                        </h3>
+                        <p class="text-gray-600 text-sm mb-4">
+                            Créez un quiz sur un sujet spécifique qui vous intéresse
+                        </p>
+                        <div class="flex gap-3">
+                            <input 
+                                type="text" 
+                                id="quiz-topic" 
+                                class="input-field flex-grow" 
+                                placeholder="Ex: les tarifs, la sécurité, les horaires..."
+                            >
+                            <button id="topic-quiz-btn" class="btn-primary">
+                                Générer
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Séparateur visuel -->
+                    <div class="flex items-center gap-4">
+                        <div class="flex-1 h-px bg-gradient-to-r from-transparent via-gray-300 to-transparent"></div>
+                        <span class="text-gray-400 font-medium">OU</span>
+                        <div class="flex-1 h-px bg-gradient-to-r from-transparent via-gray-300 to-transparent"></div>
+                    </div>
+                    
+                    <!-- Bouton quiz aléatoire -->
+                    <button id="random-quiz-btn" class="btn-secondary w-full flex items-center justify-center gap-3">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        <span>Générer un Quiz Aléatoire</span>
+                        <span class="text-sm text-gray-500">(Surprise !)</span>
+                    </button>
+                </div>
+                
+                <!-- Conteneurs pour le quiz et les résultats -->
+                <div id="quiz-container" class="mt-8"></div>
+                <div id="quiz-results-container" class="mt-8 space-y-4"></div>
+            </div>
+        </main>
+
+        <!-- Footer informatif -->
+        <footer class="text-center mt-8 text-gray-500 text-sm">
+            <p>Propulsé par l'IA • Vos données sont sécurisées • Version 2.0</p>
+        </footer>
+    </div>
+
+    <!-- ===== NOUVEL INDICATEUR DE CHARGEMENT FIXE ===== -->
+    <div id="loading-indicator" class="fixed bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-3 bg-white/90 backdrop-blur-md px-6 py-3 rounded-full shadow-lg border border-gray-200/50 transition-all duration-300 transform opacity-0 translate-y-4 pointer-events-none z-50">
+        <div class="loading-dots">
+            <span></span>
+            <span></span>
+            <span></span>
+        </div>
+        <span id="loading-text" class="text-gray-600 font-medium">Réflexion en cours...</span>
+    </div>
+
+
+    <script>
+        // --- Références aux éléments du DOM ---
+        const tabChat = document.getElementById('tab-chat');
+        const tabQuiz = document.getElementById('tab-quiz');
+        const panelChat = document.getElementById('panel-chat');
+        const panelQuiz = document.getElementById('panel-quiz');
+        
+        const questionInput = document.getElementById('user-question');
+        const askBtn = document.getElementById('ask-btn');
+        const chatOutput = document.getElementById('chat-output');
+        
+        const quizTopicInput = document.getElementById('quiz-topic');
+        const topicQuizBtn = document.getElementById('topic-quiz-btn');
+        const randomQuizBtn = document.getElementById('random-quiz-btn');
+        const quizContainer = document.getElementById('quiz-container');
+        const quizResultsContainer = document.getElementById('quiz-results-container');
+
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const loadingText = document.getElementById('loading-text');
+
+        let currentQuizData = [];
+
+        // --- NOUVELLES FONCTIONS DE GESTION DU CHARGEMENT ---
+        function showLoader(text = "Réflexion en cours...") {
+            loadingText.textContent = text;
+            loadingIndicator.classList.remove('opacity-0', 'translate-y-4', 'pointer-events-none');
+            loadingIndicator.classList.add('opacity-100', 'translate-y-0');
+            [askBtn, topicQuizBtn, randomQuizBtn].forEach(btn => btn.disabled = true);
+        }
+
+        function hideLoader() {
+            loadingIndicator.classList.add('opacity-0', 'translate-y-4', 'pointer-events-none');
+            loadingIndicator.classList.remove('opacity-100', 'translate-y-0');
+            [askBtn, topicQuizBtn, randomQuizBtn].forEach(btn => btn.disabled = false);
+        }
+        
+        // --- Logique des Onglets ---
+        function switchTab(activeTab) {
+            if (activeTab === 'chat') {
+                tabChat.classList.add('tab-active');
+                tabChat.classList.remove('tab-inactive');
+                tabQuiz.classList.add('tab-inactive');
+                tabQuiz.classList.remove('tab-active');
+                panelChat.classList.add('active');
+                panelQuiz.classList.remove('active');
+            } else {
+                tabQuiz.classList.add('tab-active');
+                tabQuiz.classList.remove('tab-inactive');
+                tabChat.classList.add('tab-inactive');
+                tabChat.classList.remove('tab-active');
+                panelQuiz.classList.add('active');
+                panelChat.classList.remove('active');
+            }
+        }
+
+        tabChat.addEventListener('click', () => switchTab('chat'));
+        tabQuiz.addEventListener('click', () => switchTab('quiz'));
+        
+        // --- Logique du Chat ---
+        function addChatMessage(content, type = 'ai') {
+            const messageDiv = document.createElement('div');
+            const formattedContent = content
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\n/g, '<br>');
+
+            if (type === 'user') {
+                messageDiv.className = 'flex justify-end';
+                messageDiv.innerHTML = `<div class="message-user animate-fadeIn">${formattedContent}</div>`;
+            } else {
+                messageDiv.className = 'flex justify-start';
+                messageDiv.innerHTML = `<div class="message-ai animate-fadeIn">${formattedContent}</div>`;
+            }
+            chatOutput.appendChild(messageDiv);
+            chatOutput.scrollTop = chatOutput.scrollHeight;
+        }
+
+        askBtn.addEventListener('click', async () => {
+            const question = questionInput.value.trim();
+            if (!question) {
+                questionInput.classList.add('animate-pulse');
+                setTimeout(() => questionInput.classList.remove('animate-pulse'), 1000);
+                return;
+            }
+            
+            addChatMessage(question, 'user');
+            questionInput.value = '';
+            showLoader("Réflexion en cours..."); // Utilisation de la nouvelle fonction
+
+            try {
+                const response = await fetch('/api/ask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question })
+                });
+                if (!response.ok) throw new Error(`Erreur du serveur: ${response.statusText}`);
+                const data = await response.json();
+                addChatMessage(data.answer, 'ai');
+            } catch (error) {
+                addChatMessage(`❌ <strong>Erreur :</strong> ${error.message}`, 'ai');
+            } finally {
+                hideLoader(); // Utilisation de la nouvelle fonction
+            }
+        });
+        
+        questionInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { 
+                e.preventDefault(); 
+                askBtn.click(); 
+            }
+        });
+
+        // --- Logique du Quiz ---
+        async function generateQuiz(topic = null) {
+            quizContainer.innerHTML = '';
+            quizResultsContainer.innerHTML = '';
+            showLoader("🎯 Génération du quiz en cours..."); // Utilisation de la nouvelle fonction
+
+            try {
+                const response = await fetch('/api/generate-quiz', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(topic ? { topic } : {})
+                });
+                if (!response.ok) throw new Error(`Erreur du serveur: ${response.statusText}`);
+                const quizData = await response.json();
+                currentQuizData = quizData;
+                renderInteractiveQuiz(quizData);
+            } catch (error) {
+                quizContainer.innerHTML = `
+                    <div class="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
+                        <p class="font-semibold">❌ Erreur lors de la génération du quiz</p>
+                        <p class="text-sm mt-1">${error.message}</p>
+                    </div>
+                `;
+            } finally {
+                hideLoader(); // Utilisation de la nouvelle fonction
+            }
+        }
+        
+        function renderInteractiveQuiz(quizData) {
+            const form = document.createElement('form');
+            form.id = 'quiz-form';
+            form.className = 'space-y-6';
+
+            // En-tête du quiz
+            const header = document.createElement('div');
+            header.className = 'text-center mb-8';
+            header.innerHTML = `
+                <h2 class="text-2xl font-bold text-gray-800">📝 Quiz Interactif</h2>
+                <p class="text-gray-600 mt-2">${quizData.length} questions pour tester vos connaissances</p>
+            `;
+            form.appendChild(header);
+
+            quizData.forEach((q, index) => {
+                const questionBlock = document.createElement('div');
+                questionBlock.className = 'quiz-card';
+                
+                let optionsHTML = q.options.map((opt) => `
+                    <label class="quiz-option flex items-center gap-3">
+                        <input type="radio" name="question-${index}" value="${opt}" class="text-purple-600 focus:ring-purple-500">
+                        <span>${opt}</span>
+                    </label>
+                `).join('');
+
+                questionBlock.innerHTML = `
+                    <div class="flex items-start gap-3 mb-4">
+                        <span class="flex-shrink-0 w-8 h-8 bg-gradient-to-r from-pink-500 to-violet-600 text-white rounded-full flex items-center justify-center font-bold text-sm">
+                            ${index + 1}
+                        </span>
+                        <p class="font-semibold text-gray-800 flex-1">${q.question}</p>
+                    </div>
+                    <div class="ml-11 space-y-2">${optionsHTML}</div>
+                    <div class="ml-11 mt-4 p-3 bg-blue-50 rounded-lg">
+                        <p class="text-sm text-blue-700">
+                            <span class="font-semibold">💡 Indice :</span> ${q.hint}
+                        </p>
+                    </div>
+                `;
+                form.appendChild(questionBlock);
+            });
+
+            const submitButton = document.createElement('button');
+            submitButton.type = 'submit';
+            submitButton.className = 'btn-primary w-full mt-8 flex items-center justify-center gap-2';
+            submitButton.innerHTML = `
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+                <span>Valider mes réponses</span>
+            `;
+            form.appendChild(submitButton);
+
+            quizContainer.innerHTML = '';
+            quizContainer.appendChild(form);
+            form.addEventListener('submit', handleQuizSubmit);
+        }
+
+        async function handleQuizSubmit(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            const userAnswers = {};
+            
+            let allAnswered = true;
+            for (let i = 0; i < currentQuizData.length; i++) {
+                const answer = formData.get(`question-${i}`);
+                if (!answer) {
+                    allAnswered = false;
+                    const questionBlock = document.querySelectorAll('.quiz-card')[i];
+                    questionBlock.classList.add('border-red-400', 'bg-red-50');
+                    setTimeout(() => {
+                        questionBlock.classList.remove('border-red-400', 'bg-red-50');
+                    }, 2000);
+                }
+                userAnswers[i] = answer || "Non répondu";
+            }
+
+            if (!allAnswered) {
+                alert("⚠️ Veuillez répondre à toutes les questions avant de valider !");
+                return;
+            }
+
+            showLoader("📊 Correction en cours..."); // Utilisation de la nouvelle fonction
+            
+            try {
+                const response = await fetch('/api/correct-quiz', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ quizData: currentQuizData, userAnswers })
+                });
+                if (!response.ok) throw new Error(`Erreur du serveur: ${response.statusText}`);
+                const resultsData = await response.json();
+                displayQuizResults(resultsData);
+            } catch (error) {
+                quizResultsContainer.innerHTML = `
+                    <div class="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700">
+                        <p class="font-semibold">❌ Erreur lors de la correction</p>
+                        <p class="text-sm mt-1">${error.message}</p>
+                    </div>
+                `;
+            } finally {
+                hideLoader(); // Utilisation de la nouvelle fonction
+            }
+        }
+
+        function displayQuizResults(resultsData) {
+            quizContainer.innerHTML = '';
+            
+            const percentage = Math.round((resultsData.score / resultsData.total) * 100);
+            let emoji, message, bgColor;
+            
+            if (percentage >= 80) {
+                emoji = "🎉";
+                message = "Excellent travail !";
+                bgColor = "from-green-400 to-emerald-500";
+            } else if (percentage >= 60) {
+                emoji = "👍";
+                message = "Bon résultat !";
+                bgColor = "from-blue-400 to-indigo-500";
+            } else {
+                emoji = "💪";
+                message = "Continuez vos efforts !";
+                bgColor = "from-orange-400 to-red-500";
+            }
+            
+            const scoreHeader = `
+                <div class="text-center p-8 bg-gradient-to-r ${bgColor} text-white rounded-2xl shadow-lg mb-8">
+                    <div class="text-6xl mb-4">${emoji}</div>
+                    <h2 class="text-3xl font-bold mb-2">${message}</h2>
+                    <p class="text-5xl font-bold">${resultsData.score} / ${resultsData.total}</p>
+                    <p class="text-xl mt-2 opacity-90">${percentage}% de réussite</p>
+                </div>
+            `;
+            
+            let resultsHTML = resultsData.results.map((res, index) => {
+                const resultClass = res.isCorrect ? 'result-correct' : 'result-incorrect';
+                const icon = res.isCorrect 
+                    ? `<svg class="h-6 w-6 text-green-600" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" /></svg>` 
+                    : `<svg class="h-6 w-6 text-red-600" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" /></svg>`;
+
+                return `
+                    <div class="p-6 rounded-xl ${resultClass} space-y-3">
+                        <div class="flex items-start gap-3">
+                            ${icon}
+                            <div class="flex-1">
+                                <p class="font-semibold text-gray-800">Question ${index + 1}: ${res.question}</p>
+                                <div class="mt-3 space-y-2 text-sm">
+                                    <p class="flex items-center gap-2">
+                                        <span class="font-medium">Votre réponse :</span>
+                                        <span class="${res.isCorrect ? 'text-green-700 font-semibold' : 'text-red-700'}">${res.userAnswer}</span>
+                                    </p>
+                                    ${!res.isCorrect ? `
+                                        <p class="flex items-center gap-2">
+                                            <span class="font-medium">Réponse correcte :</span>
+                                            <span class="text-green-700 font-semibold">${res.correctAnswer}</span>
+                                        </p>
+                                    ` : ''}
+                                    <div class="mt-3 p-3 bg-white/70 rounded-lg">
+                                        <p class="text-gray-700">
+                                            <span class="font-semibold">📚 Explication :</span> ${res.justification}
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            const retryButton = `
+                <div class="mt-8 text-center">
+                    <button onclick="location.reload()" class="btn-secondary">
+                        <svg class="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Faire un nouveau quiz
+                    </button>
+                </div>
+            `;
+
+            quizResultsContainer.innerHTML = scoreHeader + resultsHTML + retryButton;
+            quizResultsContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        // Écouteurs d'événements pour les boutons de quiz
+        randomQuizBtn.addEventListener('click', () => generateQuiz());
+        topicQuizBtn.addEventListener('click', () => {
+            const topic = quizTopicInput.value.trim();
+            if(topic) {
+                generateQuiz(topic);
+            } else {
+                quizTopicInput.classList.add('animate-pulse', 'border-red-400');
+                setTimeout(() => {
+                    quizTopicInput.classList.remove('animate-pulse', 'border-red-400');
+                }, 1000);
+            }
+        });
+        
+        // Message de bienvenue amélioré
+        addChatMessage(`
+            👋 <strong>Bienvenue sur MyBus-GPT !</strong><br><br>
+            Je suis votre assistant virtuel spécialisé dans tout ce qui concerne MyBus. 
+            Je peux répondre à vos questions sur :<br>
+            • Les fonctionnalités de l'application<br>
+            • Les tarifs et abonnements<br>
+            • Les horaires et trajets<br>
+            • La sécurité et les services<br><br>
+            N'hésitez pas à me poser vos questions ou testez vos connaissances avec un quiz ! 🚌
+        `);
+
+        // Animation de focus sur le champ de saisie au chargement
+        setTimeout(() => {
+            questionInput.focus();
+        }, 500);
+    </script>
+</body>
+</html>
