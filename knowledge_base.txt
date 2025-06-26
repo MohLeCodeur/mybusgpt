@@ -8117,3 +8117,16 @@ module.exports = {
     require('@tailwindcss/typography')
   ],
 }
+Contributions des Membres du Projet MyBus
+
+Mohamed Coulibaly, alias Moh le codeur ou mohxl, a été en charge de la partie réservation de billets de bus. Il a effectué des recherches approfondies et a réalisé tout le développement de cette fonctionnalité. Malgré certains blocages initiaux, il a compris que l’hébergement était indispensable pour le bon fonctionnement du système. Il a ensuite brillamment intégré l’API de paiement Vitepay (Orange Money), surmontant les difficultés techniques rencontrées. Mohamed a également joué un rôle central dans la fusion des travaux de tous les membres, en regroupant les différentes parties du code pour construire une version complète et fonctionnelle du projet, tant sur le frontend que sur le backend.
+
+Amadou Gouro Dia a apporté un soutien précieux à Mohamed dans la mise en place du système de réservation. Il a mené plusieurs démarches pour trouver des solutions de paiement avant que le choix final ne se porte sur Vitepay. En parallèle, il a travaillé avec Oumar sur la fonctionnalité de suivi en temps réel des bus, et s’est toujours montré disponible pour aider ses coéquipiers.
+
+Oumar Traoré a contribué activement au développement de la fonctionnalité de géolocalisation et de suivi en temps réel des bus, en collaboration avec Amadou. Il s’est aussi démarqué par ses suggestions pertinentes et régulières, qui ont largement contribué à faire avancer le projet dans la bonne direction.
+
+Kelly Abdoulaye a pris en main toute la partie administration de la plateforme, ainsi que le suivi des colis. Membre fondateur du projet, c’est lui qui a eu l’idée initiale de MyBus. Il a joué un rôle déterminant dans l’obtention de l’API Vitepay grâce à ses compétences en communication et en négociation. Il a même rédigé une lettre officielle adressée au Directeur Général de Vitepay pour faciliter cette acquisition.
+
+Aminata Fofana s’est occupée de la rédaction du mémoire du projet avec brio. Grâce à sa maîtrise de Word et à son sens du style, elle a su structurer et formuler le contenu de manière claire, professionnelle et élégante, tout en intégrant les différentes corrections nécessaires.
+
+Fatoumata Touré a collaboré étroitement avec Aminata dans la rédaction du mémoire. Elle s’est particulièrement illustrée par ses analyses approfondies, notamment lors de la création des diagrammes techniques du projet, apportant une véritable valeur ajoutée à la partie théorique et conceptuelle.
