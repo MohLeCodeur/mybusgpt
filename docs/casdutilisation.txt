@@ -1,0 +1,51 @@
+@startuml
+title Cas d'Utilisation - MyBus Mali
+
+left to right direction
+
+actor Client
+actor Administrateur as Admin
+
+rectangle "Fonctions Client" {
+  usecase "Gérer son Compte (Auth)" as AuthC
+  usecase "Rechercher un Trajet" as Search
+  usecase "Réserver et Payer un Billet" as Book
+  usecase "Consulter Dashboard Client" as ClientDB
+  usecase "Suivre son Bus en Direct" as TrackBus
+  usecase "Suivre le Statut d'un Colis" as TrackColis
+}
+
+rectangle "Fonctions Administrateur" {
+  usecase "Gérer les Bus (CRUD)" as ManageBus
+  usecase "Gérer les Chauffeurs (CRUD)" as ManageDriver
+  usecase "Gérer les Trajets (CRUD)" as ManageTrip
+  usecase "Gérer les Colis (CRUD)" as ManageColis
+  usecase "Consulter Paiements / Stats" as ViewStats
+  usecase "Démarrer un Voyage (Live)" as StartLive
+  usecase "Gérer son Compte (Auth)" as AuthA
+}
+
+' Relations Client
+Client --> AuthC
+Client --> Search
+Client --> Book
+Client --> ClientDB
+Client --> TrackBus
+Client --> TrackColis
+
+' Relations Admin
+Admin --> AuthA
+Admin --> ManageBus
+Admin --> ManageDriver
+Admin --> ManageTrip
+Admin --> ManageColis
+Admin --> ViewStats
+Admin --> StartLive
+
+' Relations entre cas d'utilisation
+Book .> AuthC : <<include>>
+ClientDB .> AuthC : <<include>>
+TrackBus .> ClientDB : <<extend>>
+StartLive .> ManageTrip : <<extend>>
+
+@enduml

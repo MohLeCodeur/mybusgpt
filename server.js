@@ -3,91 +3,121 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs').promises;
+const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Servir les fichiers statiques du dossier 'public'
 app.use(express.static(path.join(__dirname, './public')));
 
-// Configuration de l'API Gemini
+// Configuration Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); // Utilisation de 1.5-flash qui est excellent pour le JSON et le suivi d'instructions
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); 
 
-// Charger la base de connaissances
+// Chargement base de connaissances multi-formats
+const allowedExtensions = ['.txt', '.md', '.pdf', '.docx'];
+const docsPath = path.join(__dirname, 'docs');
 let knowledgeBase = '';
-fs.readFile(path.join(__dirname, 'knowledge_base.txt'), 'utf8')
-  .then(data => {
-    knowledgeBase = data;
-    console.log("✅ Base de connaissances chargée avec succès.");
-  })
-  .catch(err => {
-    console.error("❌ Erreur de chargement de la base de connaissances :", err);
-  });
 
-// --- Route pour poser des questions (inchangée) ---
+async function extractTextFromFile(filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+
+    if (ext === '.txt' || ext === '.md') {
+        return fs.readFile(filePath, 'utf8');
+    }
+    if (ext === '.pdf') {
+        const data = await fs.readFile(filePath);
+        const pdfData = await pdfParse(data);
+        return pdfData.text;
+    }
+    if (ext === '.docx') {
+        const result = await mammoth.extractRawText({ path: filePath });
+        return result.value;
+    }
+
+    return '';
+}
+
+async function loadKnowledgeBase() {
+    try {
+        const files = await fs.readdir(docsPath);
+        const allowedFiles = files.filter(file =>
+            allowedExtensions.includes(path.extname(file).toLowerCase())
+        );
+
+        const fileContents = await Promise.all(
+            allowedFiles.map(file => extractTextFromFile(path.join(docsPath, file)))
+        );
+
+        knowledgeBase = fileContents.join('\n\n');
+        console.log(`✅ ${allowedFiles.length} fichier(s) chargé(s) dans la base de connaissances :`, allowedFiles);
+    } catch (err) {
+        console.error("❌ Erreur lors du chargement des fichiers :", err);
+    }
+}
+
+loadKnowledgeBase();
+
+// --- Route question ---
 app.post('/api/ask', async (req, res) => {
-  const { question } = req.body;
-  if (!question) {
-    return res.status(400).json({ error: "Question manquante." });
-  }
+    const { question } = req.body;
+    if (!question) {
+        return res.status(400).json({ error: "Question manquante." });
+    }
 
-  const prompt = `
+    const prompt = `
     Tu es un assistant expert spécialisé dans le projet MyBus.
-    Ta mission principale est de répondre aux questions en te basant sur la documentation du projet fournie ci-dessous.
-    Si la réponse se trouve dans la documentation, réponds directement.
-    Si la réponse ne se trouve PAS dans la documentation, commence ta réponse par la phrase "Cette information n'est pas dans la documentation du projet, mais voici une réponse basée sur mes connaissances générales :", puis réponds à la question.
+    Réponds uniquement en te basant sur la documentation suivante.
+    Si l'information n'est pas présente, commence ta réponse par : 
+    "Cette information n'est pas dans la documentation du projet, mais voici une réponse basée sur mes connaissances générales :"
 
     --- DOCUMENTATION DU PROJET MYBUS ---
     ${knowledgeBase}
     --- FIN DE LA DOCUMENTATION ---
 
-    Question de l'utilisateur : "${question}"
+    Question : "${question}"
 
     Ta réponse :
-  `;
+    `;
 
-  try {
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    res.json({ answer: response.text() });
-  } catch (error) {
-    console.error("❌ Erreur API Gemini :", error);
-    res.status(500).json({ error: "Erreur lors de la communication avec l'API Gemini." });
-  }
+    try {
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        res.json({ answer: response.text() });
+    } catch (error) {
+        console.error("❌ Erreur API Gemini :", error);
+        res.status(500).json({ error: "Erreur lors de la communication avec l'API Gemini." });
+    }
 });
 
-// --- Route pour générer un quiz (Mise à jour pour accepter un sujet) ---
+// --- Route génération quiz ---
 app.post('/api/generate-quiz', async (req, res) => {
-    const { topic } = req.body; // Récupère le sujet optionnel
-
-    // Instruction dynamique basée sur la présence d'un sujet
+    const { topic } = req.body;
     const topicInstruction = topic 
-        ? `Génère un quiz de 5 questions spécifiquement sur le sujet suivant : "${topic}". Si le sujet est trop vague ou non couvert par la documentation, génère un quiz sur les thèmes principaux.`
+        ? `Génère un quiz de 5 questions sur le sujet : "${topic}". Si ce n'est pas couvert, fais-le sur les thèmes principaux.`
         : "Génère un quiz varié de 5 questions sur l'ensemble de la documentation.";
 
     const prompt = `
-        En te basant exclusivement sur la documentation du projet MyBus fournie ci-dessous, génère un quiz.
-        ${topicInstruction}
-        Le quiz doit être au format JSON valide et suivre précisément cette structure : un tableau de 5 objets.
-        Chaque objet doit contenir :
-        - "question": (string) La question.
-        - "options": (array of strings) Un tableau de 4 options de réponse possibles.
-        - "answer": (string) Le texte exact de la bonne réponse parmi les options.
-        - "hint": (string) Un indice pour aider l'utilisateur.
+    En te basant uniquement sur la documentation ci-dessous, génère un quiz.
+    ${topicInstruction}
+    Format JSON précis : tableau de 5 objets avec les clés :
+    - "question": (string)
+    - "options": (array of strings, 4 choix)
+    - "answer": (string, bonne réponse)
+    - "hint": (string, indice)
 
-        Ne génère RIEN d'autre que le tableau JSON lui-même.
+    Ne génère rien d'autre que le tableau JSON.
 
-        --- DOCUMENTATION DU PROJET MYBUS ---
-        ${knowledgeBase}
-        --- FIN DE LA DOCUMENTATION ---
+    --- DOCUMENTATION DU PROJET MYBUS ---
+    ${knowledgeBase}
+    --- FIN DE LA DOCUMENTATION ---
 
-        Génère maintenant le quiz JSON.
+    Génère maintenant :
     `;
 
-    console.log("📝 Prompt envoyé pour la génération du quiz (sujet : " + (topic || "Aléatoire") + ").");
+    console.log("📝 Génération du quiz, sujet :", topic || "Aléatoire");
 
     const generationConfig = {
         responseMimeType: "application/json",
@@ -102,51 +132,47 @@ app.post('/api/generate-quiz', async (req, res) => {
         const quizJson = JSON.parse(responseText);
         res.json(quizJson);
     } catch (error) {
-        console.error("❌ Erreur API Gemini (Quiz) :", error);
+        console.error("❌ Erreur génération quiz :", error);
         res.status(500).json({ error: "Erreur lors de la génération du quiz.", details: error.message });
     }
 });
 
-// === NOUVELLE ROUTE POUR LA CORRECTION DU QUIZ ===
+// --- Route correction quiz ---
 app.post('/api/correct-quiz', async (req, res) => {
     const { quizData, userAnswers } = req.body;
 
     if (!quizData || !userAnswers) {
-        return res.status(400).json({ error: "Données du quiz ou réponses de l'utilisateur manquantes." });
+        return res.status(400).json({ error: "Données du quiz ou réponses manquantes." });
     }
 
     const prompt = `
-        Tu es un correcteur de quiz expert.
-        Ta mission est de corriger les réponses d'un utilisateur et de fournir un résultat détaillé au format JSON.
+    Tu es un correcteur de quiz expert.
+    Voici le quiz et les réponses de l'utilisateur :
 
-        Voici le quiz original avec les bonnes réponses :
-        ${JSON.stringify(quizData, null, 2)}
+    Quiz : ${JSON.stringify(quizData, null, 2)}
+    Réponses de l'utilisateur : ${JSON.stringify(userAnswers, null, 2)}
 
-        Voici les réponses fournies par l'utilisateur :
-        ${JSON.stringify(userAnswers, null, 2)}
-
-        Analyse chaque réponse et génère un objet JSON unique avec la structure suivante :
+    Corrige et retourne ce JSON unique :
+    {
+      "score": nombre de bonnes réponses,
+      "total": nombre total de questions,
+      "results": [
         {
-          "score": (number) Le nombre de bonnes réponses.
-          "total": (number) Le nombre total de questions.
-          "results": [
-            {
-              "question": (string) Le texte de la question.
-              "userAnswer": (string) La réponse de l'utilisateur (ou "Non répondu").
-              "correctAnswer": (string) La bonne réponse.
-              "isCorrect": (boolean) True si la réponse de l'utilisateur est correcte, sinon false.
-              "justification": (string) Une brève explication sur pourquoi la bonne réponse est correcte, basée sur la documentation.
-            }
-          ]
+          "question": texte de la question,
+          "userAnswer": réponse utilisateur (ou "Non répondu"),
+          "correctAnswer": bonne réponse,
+          "isCorrect": true/false,
+          "justification": courte explication
         }
-        Ne renvoie rien d'autre que cet objet JSON.
+      ]
+    }
+
+    Rien d'autre que ce JSON.
     `;
 
     const generationConfig = {
         responseMimeType: "application/json",
     };
-
-    console.log("📝 Envoi des réponses pour correction...");
 
     try {
         const result = await model.generateContent({
@@ -155,17 +181,15 @@ app.post('/api/correct-quiz', async (req, res) => {
         });
         const responseText = (await result.response).text();
         const correctionJson = JSON.parse(responseText);
-        console.log("✅ Correction reçue de l'API.");
         res.json(correctionJson);
     } catch (error) {
-        console.error("❌ Erreur API Gemini (Correction Quiz) :", error);
-        res.status(500).json({ error: "Erreur lors de la correction du quiz.", details: error.message });
+        console.error("❌ Erreur correction quiz :", error);
+        res.status(500).json({ error: "Erreur lors de la correction.", details: error.message });
     }
 });
 
-
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-    console.log(`🚀 Serveur backend démarré sur http://localhost:${PORT}`);
-    console.log(`Interface utilisateur disponible sur http://localhost:${PORT}`);
+    console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
+    console.log(`📂 Interface dispo sur http://localhost:${PORT}`);
 });

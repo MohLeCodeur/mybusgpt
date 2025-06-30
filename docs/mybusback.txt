@@ -1,0 +1,3256 @@
+mybusback: node js + express js + ...
+
+config :
+db.js:
+// backend/config/db.js
+const mongoose = require("mongoose");
+
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGO_URI, {});
+    console.log(`✅ MongoDB Connecté: ${conn.connection.host}`);
+  } catch (err) {
+    console.error(`❌ Erreur de connexion MongoDB: ${err.message}`);
+    process.exit(1);
+  }
+};
+
+module.exports = connectDB;
+controllers:
+auth.controller.js:
+// backend/controllers/auth.controller.js
+const Client = require("../models/client.model");
+const jwt = require("jsonwebtoken");
+const { validationResult } = require("express-validator");
+
+const generateToken = (id) => {
+  return jwt.sign({ id }, process.env.JWT_SECRET, {
+    expiresIn: "30d",
+  });
+};
+
+// POST /api/auth/register
+exports.register = async (req, res) => {
+  // --- NOUVELLE PARTIE : VÉRIFICATION DES RÉSULTATS DE VALIDATION ---
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    // S'il y a des erreurs, on renvoie la première au client
+    return res.status(400).json({ message: errors.array()[0].msg });
+  }
+  // -----------------------------------------------------------------
+
+  const { prenom, nom, email, mot_de_passe, telephone } = req.body;
+  try {
+    const userExists = await Client.findOne({ email });
+    if (userExists) {
+      return res.status(400).json({ message: "Cet email est déjà utilisé." });
+    }
+
+    let role = 'client';
+    if (email && email.toLowerCase().endsWith('@admin.ml')) {
+      role = 'admin';
+    }
+    
+    const user = await Client.create({ prenom, nom, email, mot_de_passe, telephone, role });
+
+    res.status(201).json({
+      _id: user._id, prenom: user.prenom, nom: user.nom,
+      email: user.email, role: user.role,
+      token: generateToken(user._id),
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// POST /api/auth/login (aucun changement ici, la logique reste la même)
+exports.login = async (req, res) => {
+  const { email, mot_de_passe } = req.body;
+  try {
+    const user = await Client.findOne({ email });
+    if (user && (await user.matchPassword(mot_de_passe))) {
+      res.json({
+        _id: user._id,
+        prenom: user.prenom,
+        nom: user.nom,
+        email: user.email,
+        role: user.role,
+        token: generateToken(user._id),
+      });
+    } else {
+      res.status(401).json({ message: "Email ou mot de passe invalide" });
+    }
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// GET /api/auth/profile (aucun changement ici)
+exports.getUserProfile = async (req, res) => {
+  res.json(req.user);
+};
+bus.controller.js:
+// backend/controllers/bus.controller.js
+const Bus = require("../models/bus.model");
+const mongoose = require('mongoose'); // Important pour les opérations avancées
+
+/**
+ * @desc    Récupérer tous les bus avec leurs statistiques d'occupation et leur prochain trajet.
+ *          Utilise une agrégation MongoDB pour des performances optimales.
+ * @route   GET /api/admin/bus
+ * @access  Admin
+ */
+exports.getBuses = async (req, res) => {
+  try {
+    const { page = 1, limit = 7, sortBy = 'numero_asc', search = '', etat = '' } = req.query;
+    
+    // --- Étape 1: Filtre de base ($match) ---
+    let matchStage = {};
+    if (search) {
+        matchStage.numero = { $regex: search, $options: 'i' };
+    }
+    if (etat) {
+        matchStage.etat = etat;
+    }
+
+    // --- Étape 2: Pipeline d'agrégation commun ---
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    let aggregationPipeline = [
+      // Appliquer le filtre initial s'il y en a un
+      ...(Object.keys(matchStage).length ? [{ $match: matchStage }] : []),
+      // Le reste du pipeline de calcul reste le même
+      { $lookup: { from: 'trajets', localField: '_id', foreignField: 'bus', as: 'trajetsAssignes' } },
+      { $addFields: { trajetsFuturs: { $filter: { input: '$trajetsAssignes', as: 'trajet', cond: { $gte: ['$$trajet.dateDepart', today] } } } } },
+      { $lookup: { from: 'reservations', localField: 'trajetsFuturs._id', foreignField: 'trajet', as: 'reservationsFutures' } },
+      { $project: {
+          _id: 1, numero: 1, etat: 1, capacite: 1, createdAt: 1, updatedAt: 1,
+          placesReservees: { $sum: { $map: { input: { $filter: { input: "$reservationsFutures", as: "res", cond: { $eq: ["$$res.statut", "confirmée"] } } }, as: "reservation", in: "$$reservation.placesReservees" } } },
+          prochainTrajet: { $first: { $sortArray: { input: "$trajetsFuturs", sortBy: { dateDepart: 1 } } } }
+      }}
+    ];
+
+    // --- Étape 3: Tri ---
+    let sortOptions = {};
+    switch(sortBy) {
+        case 'numero_desc': sortOptions.numero = -1; break;
+        case 'capacite_asc': sortOptions.capacite = 1; break;
+        case 'capacite_desc': sortOptions.capacite = -1; break;
+        case 'numero_asc':
+        default: sortOptions.numero = 1; break;
+    }
+
+    // --- Étape 4: Pagination avec $facet ---
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+    
+    const paginatedPipeline = [
+        ...aggregationPipeline,
+        { $sort: sortOptions },
+        { $facet: {
+            docs: [{ $skip: skip }, { $limit: limitNum }],
+            totalCount: [{ $count: 'total' }]
+        }}
+    ];
+
+    const results = await Bus.aggregate(paginatedPipeline);
+    
+    const docs = results[0].docs.map(bus => ({
+        ...bus,
+        prochainTrajet: bus.prochainTrajet ? {
+            destination: `${bus.prochainTrajet.villeDepart} → ${bus.prochainTrajet.villeArrivee}`,
+            date: bus.prochainTrajet.dateDepart
+        } : null
+    }));
+    const total = results[0].totalCount[0] ? results[0].totalCount[0].total : 0;
+
+    res.json({
+        docs,
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / limitNum)
+    });
+
+  } catch (err) {
+    console.error("Erreur [getBuses]:", err);
+    res.status(500).json({ message: "Erreur serveur lors de la récupération des bus." });
+  }
+};
+
+
+/**
+ * @desc    Créer un nouveau bus
+ * @route   POST /api/admin/bus
+ * @access  Admin
+ */
+exports.createBus = async (req, res) => {
+  try {
+    const bus = await Bus.create(req.body);
+    res.status(201).json(bus);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+/**
+ * @desc    Récupérer un bus par son ID
+ * @route   GET /api/admin/bus/:id
+ * @access  Admin
+ */
+exports.getBusById = async (req, res) => {
+  try {
+    const bus = await Bus.findById(req.params.id);
+    if (!bus) return res.status(404).json({ message: "Bus non trouvé" });
+    res.json(bus);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+/**
+ * @desc    Récupérer tous les bus disponibles (non paginé) pour les listes déroulantes.
+ * @route   GET /api/admin/bus/available
+ * @access  Admin
+ */
+exports.getAvailableBuses = async (req, res) => {
+    try {
+        // On récupère tous les bus, en triant par numéro pour un affichage logique
+        const buses = await Bus.find({}).sort({ numero: 1 });
+        res.json(buses);
+    } catch (err) {
+        console.error("Erreur [getAvailableBuses]:", err);
+        res.status(500).json({ message: "Erreur serveur lors de la récupération des bus disponibles." });
+    }
+};
+
+/**
+ * @desc    Mettre à jour un bus
+ * @route   PUT /api/admin/bus/:id
+ * @access  Admin
+ */
+exports.updateBus = async (req, res) => {
+  try {
+    const bus = await Bus.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+    if (!bus) return res.status(404).json({ message: "Bus non trouvé" });
+    res.json(bus);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+/**
+ * @desc    Supprimer un bus
+ * @route   DELETE /api/admin/bus/:id
+ * @access  Admin
+ */
+exports.deleteBus = async (req, res) => {
+  try {
+    const bus = await Bus.findByIdAndDelete(req.params.id);
+    if (!bus) return res.status(404).json({ message: "Bus non trouvé" });
+    res.json({ message: "Bus supprimé avec succès" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+chauffeur.controller.js:
+// controllers/chauffeur.controller.js
+const Chauffeur = require("../models/chauffeur.model");
+const Bus = require("../models/bus.model");
+
+/**
+ * Crée un nouveau chauffeur en s'assurant que le bus n'est pas déjà pris.
+ * POST /api/admin/chauffeurs
+ */
+exports.createChauffeur = async (req, res) => {
+  const { prenom, nom, telephone, bus: busId } = req.body;
+
+  try {
+    // Si un busId est fourni, vérifier qu'aucun autre chauffeur n'a déjà ce bus
+    if (busId) {
+      const conflict = await Chauffeur.findOne({ bus: busId });
+      if (conflict) {
+        return res
+          .status(400)
+          .json({ message: "Ce bus est déjà affecté à un autre chauffeur." });
+      }
+      // Facultatif : vérifier que le bus existe réellement
+      const busExists = await Bus.findById(busId);
+      if (!busExists) {
+        return res.status(404).json({ message: "Bus introuvable." });
+      }
+    }
+
+    const newChauffeur = await Chauffeur.create({
+      prenom,
+      nom,
+      telephone,
+      bus: busId || null,
+    });
+    return res.status(201).json(newChauffeur);
+  } catch (err) {
+    console.error("Erreur createChauffeur:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * Met à jour un chauffeur tout en vérifiant l'unicité du bus.
+ * PUT /api/admin/chauffeurs/:id
+ */
+exports.updateChauffeur = async (req, res) => {
+  const { id } = req.params;
+  const { prenom, nom, telephone, bus: busId } = req.body;
+
+  try {
+    // Si un busId est fourni, vérifier qu'aucun autre chauffeur (autre que celui-ci) ne l'a
+    if (busId) {
+      const conflict = await Chauffeur.findOne({
+        bus: busId,
+        _id: { $ne: id }, // exclure l'actuel chauffeur de la recherche
+      });
+      if (conflict) {
+        return res
+          .status(400)
+          .json({ message: "Ce bus est déjà affecté à un autre chauffeur." });
+      }
+      // Facultatif : vérifier que le bus existe réellement
+      const busExists = await Bus.findById(busId);
+      if (!busExists) {
+        return res.status(404).json({ message: "Bus introuvable." });
+      }
+    }
+
+    const updated = await Chauffeur.findByIdAndUpdate(
+      id,
+      { prenom, nom, telephone, bus: busId || null },
+      { new: true, runValidators: true }
+    );
+    if (!updated) {
+      return res.status(404).json({ message: "Chauffeur non trouvé." });
+    }
+    return res.json(updated);
+  } catch (err) {
+    console.error("Erreur updateChauffeur:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * Récupère la liste de tous les chauffeurs avec leur bus (populé).
+ * GET /api/admin/chauffeurs
+ */
+exports.getChauffeurs = async (req, res) => {
+  try {
+    const { page = 1, limit = 7, sortBy = 'name_asc', search = '' } = req.query;
+
+    let filter = {};
+    if (search) {
+      filter = {
+        $or: [
+          { prenom: { $regex: search, $options: 'i' } },
+          { nom: { $regex: search, $options: 'i' } },
+          { telephone: { $regex: search, $options: 'i' } }
+        ]
+      };
+    }
+
+    let sortOptions = {};
+    if (sortBy === 'name_desc') {
+        sortOptions.nom = -1;
+    } else {
+        sortOptions.nom = 1;
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const [docs, total] = await Promise.all([
+        Chauffeur.find(filter)
+            .populate('bus', 'numero')
+            .sort(sortOptions)
+            .skip(skip)
+            .limit(parseInt(limit)),
+        Chauffeur.countDocuments(filter)
+    ]);
+    
+    res.json({
+        docs,
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / parseInt(limit))
+    });
+
+  } catch (err) {
+    console.error("Erreur getChauffeurs:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * Récupère un chauffeur par ID (avec son bus).
+ * GET /api/admin/chauffeurs/:id
+ */
+exports.getChauffeurById = async (req, res) => {
+  try {
+    const chauffeur = await Chauffeur.findById(req.params.id).populate("bus");
+    if (!chauffeur) {
+      return res.status(404).json({ message: "Chauffeur non trouvé." });
+    }
+    return res.json(chauffeur);
+  } catch (err) {
+    console.error("Erreur getChauffeurById:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * Supprime un chauffeur (libère automatiquement le bus pour qu’il puisse être réattribué).
+ * DELETE /api/admin/chauffeurs/:id
+ */
+exports.deleteChauffeur = async (req, res) => {
+  try {
+    const deleted = await Chauffeur.findByIdAndDelete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ message: "Chauffeur non trouvé." });
+    }
+    return res.json({ message: "Chauffeur supprimé." });
+  } catch (err) {
+    console.error("Erreur deleteChauffeur:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+
+client.controller.js:
+// controllers/client.controller.js
+const Client = require("../models/client.model");
+const jwt = require("jsonwebtoken");
+
+// Génère un token JWT
+const generateToken = (id) => {
+  if (!process.env.JWT_SECRET) {
+    console.error("ERREUR CRITIQUE: JWT_SECRET n'est pas défini !");
+    // Gérer cette erreur de manière appropriée, peut-être en lançant une exception
+    // ou en renvoyant une réponse d'erreur au client pour éviter que jwt.sign échoue silencieusement
+    // ou avec une erreur cryptique si JWT_SECRET est manquant.
+  }
+  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+}
+
+// Inscription (le rôle est déterminé par l'email)
+exports.inscrireClient = async (req, res) => {
+  try {
+    const { prenom, nom, email, mot_de_passe } = req.body;
+
+    // Vérifier si l'email existe déjà
+    const exists = await Client.findOne({ email });
+    if (exists) {
+      return res.status(400).json({ message: "Email déjà utilisé" });
+    }
+
+    // Déterminer le rôle en fonction du suffixe de l'email
+    let role = "client"; // Rôle par défaut
+    if (email && email.toLowerCase().endsWith("@admin.ml")) { // Vérifie si l'email se termine par @admin.ml (insensible à la casse)
+      role = "admin";
+    }
+
+    const client = await Client.create({
+      prenom,
+      nom,
+      email,
+      mot_de_passe,
+      role, // Utilise le rôle déterminé
+    });
+
+    return res.status(201).json({
+      _id: client._id,
+      prenom: client.prenom,
+      nom: client.nom,
+      email: client.email,
+      role: client.role, // Renvoie le rôle attribué
+      token: generateToken(client._id),
+    });
+  } catch (err) {
+    console.error("Erreur dans inscrireClient:", err); // Logguer l'erreur côté serveur
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// Connexion (reste inchangée pour le moment, mais vérifiez la logique si nécessaire)
+exports.connecterClient = async (req, res) => {
+  try {
+    const { email, mot_de_passe } = req.body;
+    // console.log(`[Login Attempt] Email: ${email}, Mot de passe fourni: ${mot_de_passe}`);
+
+    const client = await Client.findOne({ email });
+
+    if (!client) {
+      // console.log(`[Login Failed] Aucun client trouvé pour l'email: ${email}`);
+      return res.status(401).json({ message: "Identifiants invalides" });
+    }
+
+    // console.log(`[Login Attempt] Client trouvé: ${client.email}, Rôle: ${client.role}`);
+    const isMatch = await client.matchPassword(mot_de_passe);
+
+    if (!isMatch) {
+      // console.log(`[Login Failed] Le mot de passe ne correspond pas pour l'email: ${email}`);
+      return res.status(401).json({ message: "Identifiants invalides" });
+    }
+
+    // console.log(`[Login Success] Connexion réussie pour: ${email}`);
+    return res.json({
+      _id: client._id,
+      prenom: client.prenom,
+      nom: client.nom,
+      email: client.email,
+      role: client.role,
+      token: generateToken(client._id),
+    });
+  } catch (err) {
+    console.error("[Login Error] Erreur interne lors de la tentative de connexion:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// Profil protégé (reste inchangée)
+exports.profilClient = async (req, res) => {
+  const client = req.client; // req.client est défini par le middleware d'authentification
+  res.json({
+    _id: client._id,
+    prenom: client.prenom,
+    nom: client.nom,
+    email: client.email,
+    role: client.role,
+  });
+};
+
+
+
+
+colis.controller.js:
+const Colis = require("../models/colis.model");
+// const smsService = require('../services/sms.service'); // si SMS
+const Client = require("../models/client.model"); 
+
+exports.creerColis = async (req, res) => {
+  try {
+    // On log ce que le backend reçoit pour être sûr
+    console.log("Corps de la requête reçu pour créer un colis :", req.body);
+
+    // La manière la plus simple et la plus sûre est de passer directement req.body
+    // au constructeur, car le frontend envoie maintenant un objet qui correspond au schéma.
+    const nouveauColis = new Colis(req.body);
+
+    // La validation (y compris la vérification que `trajet` est présent)
+    // sera gérée par Mongoose lors du .save()
+    await nouveauColis.save();
+    
+    // On renvoie le document complet qui a été créé
+    return res.status(201).json(nouveauColis);
+
+  } catch (err) {
+    console.error("Erreur création colis :", err);
+
+    // Si c'est une erreur de validation de Mongoose, on renvoie un message clair
+    if (err.name === 'ValidationError') {
+        // On peut extraire le premier message d'erreur pour plus de clarté
+        const messages = Object.values(err.errors).map(val => val.message);
+        return res.status(400).json({ message: messages[0] || "Données invalides." });
+    }
+    
+    return res.status(500).json({ message: "Erreur interne du serveur." });
+  }
+};
+
+exports.getAllColis = async (req, res) => {
+  try {
+    const { page = 1, limit = 10, sortBy = 'date_desc', search = '', statut = '' } = req.query;
+
+    let pipeline = [
+      { $lookup: { from: 'trajets', localField: 'trajet', foreignField: '_id', as: 'trajetInfo' } },
+      { $unwind: '$trajetInfo' },
+    ];
+    
+    let matchFilter = {};
+    if (statut) {
+      matchFilter.statut = statut;
+    }
+    if (search) {
+      matchFilter.$or = [
+        { code_suivi: { $regex: search, $options: 'i' } },
+        { expediteur_nom: { $regex: search, $options: 'i' } },
+        { destinataire_nom: { $regex: search, $options: 'i' } },
+        { 'trajetInfo.villeDepart': { $regex: search, $options: 'i' } },
+        { 'trajetInfo.villeArrivee': { $regex: search, $options: 'i' } },
+      ];
+    }
+    if (Object.keys(matchFilter).length > 0) {
+      pipeline.push({ $match: matchFilter });
+    }
+
+    let sortStage = {};
+    switch (sortBy) {
+        case 'date_asc': sortStage = { date_enregistrement: 1 }; break;
+        case 'price_desc': sortStage = { prix: -1 }; break;
+        case 'price_asc': sortStage = { prix: 1 }; break;
+        case 'date_desc':
+        default: sortStage = { date_enregistrement: -1 }; break;
+    }
+    pipeline.push({ $sort: sortStage });
+
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    const facetPipeline = [
+        ...pipeline,
+        { $facet: {
+            docs: [
+              { $skip: skip }, { $limit: limitNum },
+              { $project: {
+                  _id: 1, code_suivi: 1, statut: 1, prix: 1, expediteur_nom: 1, destinataire_nom: 1,
+                  'trajet.villeDepart': '$trajetInfo.villeDepart',
+                  'trajet.villeArrivee': '$trajetInfo.villeArrivee',
+              }}
+            ],
+            totalCount: [{ $count: 'total' }]
+        }}
+    ];
+
+    const results = await Colis.aggregate(facetPipeline);
+    const docs = results[0].docs;
+    const total = results[0].totalCount[0] ? results[0].totalCount[0].total : 0;
+    
+    res.json({ docs, total, page: pageNum, pages: Math.ceil(total / limitNum) });
+
+  } catch (err) {
+    console.error("Erreur getAllColis:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getColisById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // --- LIGNE CORRIGÉE ---
+    // On ajoute .populate('trajet') pour récupérer les détails du trajet associé.
+    const colis = await Colis.findById(id).populate('trajet');
+    // ----------------------
+
+    if (!colis) {
+      return res.status(404).json({ message: "Colis non trouvé" });
+    }
+    
+    return res.json(colis);
+    
+  } catch (err) {
+    console.error("Erreur getColisById:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getColisByCode = async (req, res) => {
+  try {
+    const { code } = req.params;
+    
+    // --- LIGNE MODIFIÉE ET RENDUE PLUS ROBUSTE ---
+    // On utilise la syntaxe objet pour .populate() pour spécifier exactement
+    // les champs du trajet que nous voulons récupérer. C'est une meilleure pratique.
+    const colis = await Colis.findOne({ code_suivi: code })
+      .populate({
+        path: 'trajet',
+        select: 'villeDepart villeArrivee dateDepart compagnie' // On liste les champs nécessaires
+      });
+    // ---------------------------------------------------
+
+    if (!colis) {
+      return res.status(404).json({ message: "Colis non trouvé" });
+    }
+
+    // Log de débogage côté serveur pour être sûr de ce qu'on envoie
+    console.log("Données du colis envoyées au front :", JSON.stringify(colis, null, 2));
+    
+    return res.json(colis);
+
+  } catch (err) {
+    console.error("Erreur getColisByCode :", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+exports.updateStatutColis = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { statut } = req.body;
+
+    if (!["enregistré", "encours", "arrivé"].includes(statut)) {
+      return res.status(400).json({ message: "Statut invalide" });
+    }
+
+    const colis = await Colis.findById(id);
+    if (!colis) {
+      return res.status(404).json({ message: "Colis non trouvé" });
+    }
+
+    // On ne fait rien si le statut ne change pas
+    if (colis.statut === statut) {
+        return res.json(colis);
+    }
+    
+    colis.statut = statut;
+    await colis.save();
+
+    // --- SECTION D'ÉMISSION DE LA NOTIFICATION ---
+    // 1. Vérifier si on a un email d'expéditeur
+    if (colis.expediteur_email) {
+        // 2. Trouver l'utilisateur correspondant à cet email
+        const user = await Client.findOne({ email: colis.expediteur_email });
+
+        // 3. S'il existe et qu'il est en ligne, lui envoyer la notif
+        if (user) {
+            const recipientSocketId = req.onlineUsers[user._id.toString()];
+            if (recipientSocketId) {
+                console.log(`Envoi de la notification de colis à l'utilisateur ${user._id} sur le socket ${recipientSocketId}`);
+                
+                let message;
+                if (statut === 'encours') {
+                    message = `Votre colis pour ${colis.destinataire_nom} est maintenant en cours de livraison.`;
+                } else if (statut === 'arrivé') {
+                    message = `Bonne nouvelle ! Votre colis pour ${colis.destinataire_nom} est arrivé à destination.`;
+                } else {
+                    message = `Le statut de votre colis est maintenant : ${statut}.`;
+                }
+
+                req.io.to(recipientSocketId).emit("getNotification", {
+                    title: `Mise à jour du colis #${colis.code_suivi}`,
+                    message: message,
+                    link: `/dashboard` // Le client peut voir les détails dans son dashboard
+                });
+            }
+        }
+    }
+    // ---------------------------------------------
+
+    return res.json(colis);
+
+  } catch (err) {
+    console.error("Erreur mise à jour statut colis :", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+exports.deleteColis = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const colis = await Colis.findByIdAndDelete(id);
+
+    if (!colis) {
+      return res.status(404).json({ message: "Colis non trouvé." });
+    }
+
+    res.json({ message: "Colis supprimé avec succès." });
+  } catch (err) {
+    console.error("Erreur deleteColis:", err);
+    res.status(500).json({ message: "Erreur serveur lors de la suppression du colis." });
+  }
+};
+
+exports.updateColis = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    // 1. Récupérer le colis AVANT la mise à jour pour connaître son ancien statut
+    const colisAvant = await Colis.findById(id).lean();
+    if (!colisAvant) {
+      return res.status(404).json({ message: "Colis non trouvé" });
+    }
+    const ancienStatut = colisAvant.statut;
+
+    // 2. Mettre à jour le document
+    const colisApres = await Colis.findByIdAndUpdate(id, updates, { new: true });
+    
+    // --- NOUVELLE LOGIQUE DE NOTIFICATION ---
+    // 3. Vérifier si le statut a réellement changé
+    if (ancienStatut !== colisApres.statut) {
+      console.log(`Le statut du colis ${colisApres.code_suivi} a changé de '${ancienStatut}' à '${colisApres.statut}'. Envoi de notification...`);
+
+      // La suite de la logique est identique à celle de updateStatutColis
+      if (colisApres.expediteur_email) {
+          const user = await Client.findOne({ email: colisApres.expediteur_email });
+          if (user) {
+              const recipientSocketId = req.onlineUsers[user._id.toString()];
+              if (recipientSocketId) {
+                  let message;
+                  if (colisApres.statut === 'encours') message = `Votre colis pour ${colisApres.destinataire_nom} est maintenant en cours de livraison.`;
+                  else if (colisApres.statut === 'arrivé') message = `Bonne nouvelle ! Votre colis pour ${colisApres.destinataire_nom} est arrivé à destination.`;
+                  else message = `Le statut de votre colis est maintenant : ${colisApres.statut}.`;
+
+                  req.io.to(recipientSocketId).emit("getNotification", {
+                      title: `Mise à jour du colis #${colisApres.code_suivi}`,
+                      message: message,
+                      link: `/dashboard`
+                  });
+                  console.log(`Notification envoyée à ${user.email}`);
+              } else {
+                  console.log(`Utilisateur ${user.email} trouvé mais n'est pas en ligne.`);
+              }
+          } else {
+              console.log(`Aucun utilisateur enregistré avec l'email ${colisApres.expediteur_email}.`);
+          }
+      }
+    }
+    // ----------------------------------------
+
+    return res.json(colisApres);
+
+  } catch (err) {
+    console.error("Erreur update colis :", err);
+    return res.status(400).json({ message: err.message });
+  }
+};
+dashboard.controller.js:
+// backend/controllers/dashboard.controller.js
+const mongoose = require('mongoose');
+const Reservation = require('../models/reservation.model');
+const Colis = require('../models/colis.model');
+
+// La fonction utilitaire `calculateORS_Route` reste inchangée.
+
+exports.getClientDashboardData = async (req, res) => {
+    try {
+        const now = new Date();
+        const clientId = req.user._id;
+
+        // L'agrégation pour récupérer toutes les données reste la même, elle est très efficace.
+        const allReservations = await Reservation.aggregate([
+            { $match: { client: new mongoose.Types.ObjectId(clientId), statut: 'confirmée' } },
+            { $lookup: { from: 'trajets', localField: 'trajet', foreignField: '_id', as: 'trajet' }},
+            { $unwind: '$trajet' },
+            { $lookup: { from: 'livetrips', localField: 'trajet._id', foreignField: 'trajetId', as: 'liveTrip' }},
+            { $addFields: { liveTrip: { $arrayElemAt: ['$liveTrip', 0] } }},
+            { $lookup: { from: 'bus', localField: 'trajet.bus', foreignField: '_id', as: 'trajet.bus' }},
+            { $unwind: { path: '$trajet.bus', preserveNullAndEmptyArrays: true } },
+            { $sort: { 'trajet.dateDepart': 1, 'trajet.heureDepart': 1 } } // Tri par date ET heure
+        ]);
+
+        // ==========================================================
+        // === DÉBUT DE LA NOUVELLE LOGIQUE DE SÉLECTION
+        // ==========================================================
+
+        let tripToDisplay = null;
+        let upcomingTrips = [];
+        let pastTrips = [];
+        let activeTrip = null;
+
+        // 1. On classe d'abord tous les voyages et on trouve un voyage actif
+        for (const r of allReservations) {
+            if (!r.trajet) continue;
+            
+            const departureDateTime = new Date(`${new Date(r.trajet.dateDepart).toISOString().split('T')[0]}T${r.trajet.heureDepart}:00Z`);
+            
+            if (departureDateTime > now) {
+                upcomingTrips.push(r);
+            } else {
+                pastTrips.push(r);
+                // Si on trouve un voyage en cours, on le met de côté
+                if (r.liveTrip && r.liveTrip.status === 'En cours') {
+                    activeTrip = r;
+                }
+            }
+        }
+
+        // 2. On applique la logique de priorité pour choisir le voyage à afficher
+        if (activeTrip) {
+            // Priorité 1: Un voyage est activement suivi.
+            tripToDisplay = activeTrip;
+        } else if (upcomingTrips.length > 0) {
+            // Priorité 2: Il n'y a pas de voyage actif, on prend le prochain à venir.
+            tripToDisplay = upcomingTrips[0];
+        } else if (pastTrips.length > 0) {
+            // Priorité 3 (Fallback): Aucun voyage actif ou à venir, on montre le plus récent.
+            tripToDisplay = pastTrips[pastTrips.length - 1]; // Le dernier du tableau trié par date
+        }
+        
+        // 3. On s'assure que le voyage affiché n'est pas dupliqué dans les listes
+        if (tripToDisplay) {
+            upcomingTrips = upcomingTrips.filter(t => t._id.toString() !== tripToDisplay._id.toString());
+            pastTrips = pastTrips.filter(t => t._id.toString() !== tripToDisplay._id.toString());
+        }
+
+        // ==========================================================
+        // === FIN DE LA NOUVELLE LOGIQUE DE SÉLECTION
+        // ==========================================================
+        
+        const userColis = await Colis.find({ expediteur_email: req.user.email }).sort({ date_enregistrement: -1 }).limit(5);
+
+        res.json({
+            tripToDisplay,
+            upcomingTrips,
+            pastTrips: pastTrips.reverse(), // On inverse pour avoir les plus récents en premier
+            colis: userColis,
+        });
+
+    } catch (err) {
+        console.error("Erreur getClientDashboardData:", err);
+        res.status(500).json({ message: err.message });
+    }
+};
+paiement.controller.js:
+// backend/controllers/paiement.controller.js
+const Reservation = require('../models/reservation.model');
+
+/**
+ * @desc    Récupérer tous les paiements (réservations confirmées)
+ * @route   GET /api/admin/paiements
+ * @access  Admin
+ */
+exports.getPaiements = async (req, res) => {
+    try {
+        // On ne récupère que les réservations dont le statut est 'confirmée'
+        const paiements = await Reservation.find({ statut: 'confirmée' })
+            .populate('client', 'prenom nom email')
+            .populate({
+                path: 'trajet',
+                select: 'villeDepart villeArrivee prix',
+            })
+            .sort({ dateReservation: -1 });
+        
+        // La page StatsPage fait maintenant les calculs, donc on renvoie juste la liste
+        res.json({ paiements });
+
+    } catch (err) {
+        console.error("Erreur getPaiements:", err);
+        res.status(500).json({ message: err.message });
+    }
+};
+reservation.controller.js:
+// backend/controllers/reservation.controller.js
+const mongoose = require('mongoose');
+const axios = require('axios');
+const crypto = require('crypto');
+const Reservation = require('../models/reservation.model');
+const Trajet = require('../models/trajet.model');
+
+// Sélection de l'endpoint API de VitePay en fonction de l'environnement
+const VITEPAY_API = process.env.NODE_ENV === 'production'
+  ? 'https://api.vitepay.com/v1/prod/payments'
+  : 'https://api.vitepay.com/v1/test/payments';
+
+/**
+ * @desc    Créer une réservation et initier le paiement VitePay
+ * @route   POST /api/reservations
+ * @access  Privé (client connecté)
+ */
+// backend/controllers/reservation.controller.js
+
+// ... (imports)
+
+// Remplacez cette fonction dans backend/controllers/reservation.controller.js
+
+exports.createReservationAndPay = async (req, res) => {
+  const session = await mongoose.startSession();
+  let reservation, trajet, passagers;
+
+  try {
+    session.startTransaction();
+
+    const { trajetId, contactEmail, contactTelephone } = req.body;
+    passagers = req.body.passagers; 
+    
+    const placesReservees = passagers.length;
+
+    if (!trajetId || !passagers || placesReservees === 0 || !contactEmail || !contactTelephone) {
+      throw new Error('Tous les champs sont requis.');
+    }
+    if (!req.user) {
+      throw new Error('Utilisateur non authentifié.');
+    }
+
+    trajet = await Trajet.findById(trajetId).session(session);
+    if (!trajet) throw new Error('Trajet non trouvé.');
+    if (trajet.placesDisponibles < placesReservees) {
+      throw new Error(`Seulement ${trajet.placesDisponibles} places disponibles.`);
+    }
+
+    reservation = new Reservation({
+      trajet: trajetId,
+      client: req.user._id,
+      passagers,
+      placesReservees,
+      statut: 'en_attente'
+    });
+    await reservation.save({ session });
+
+    trajet.placesDisponibles -= placesReservees;
+    await trajet.save({ session });
+
+    await session.commitTransaction();
+
+  } catch (err) {
+    await session.abortTransaction();
+    console.error('Erreur lors de la transaction DB:', err.message);
+    return res.status(400).json({ message: err.message });
+  } finally {
+    session.endSession();
+  }
+
+  try {
+    const order_id = reservation._id.toString();
+    const montantFCFA = trajet.prix * reservation.placesReservees;
+    const amount_100 = montantFCFA * 100;
+    const callback_url = `${process.env.BACKEND_URL}/api/vitepay/callback`;
+    const return_url = `${process.env.FRONTEND_URL}/confirmation/${order_id}`;
+    const decline_url = `${process.env.FRONTEND_URL}/payment-failed`;
+    const cancel_url = `${process.env.FRONTEND_URL}/search`;
+
+    const rawString = `${order_id};${amount_100};XOF;${callback_url};${process.env.VITEPAY_API_SECRET}`.toUpperCase();
+    const hash = crypto.createHash('sha1').update(rawString).digest('hex');
+
+    // --- CORRECTION DE L'IP ---
+    const forwardedIps = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+    const buyerIp = forwardedIps.split(',')[0].trim();
+    // -------------------------
+
+    const payload = {
+      payment: {
+        order_id,
+        language_code: 'fr',
+        currency_code: 'XOF',
+        country_code: 'ML',
+        p_type: 'orange_money',
+        description: `Réservation #${order_id}`,
+        amount_100,
+        return_url,
+        decline_url,
+        cancel_url,
+        callback_url,
+        buyer_ip_adress: buyerIp, // Utilisation de l'IP nettoyée
+        email: req.body.contactEmail,
+        buyer_name: `${passagers[0].prenom} ${passagers[0].nom}`,
+        buyer_phone_number: req.body.contactTelephone,
+      },
+      redirect: 0,
+      api_key: process.env.VITEPAY_API_KEY,
+      hash,
+      ...(process.env.NODE_ENV !== 'production' ? { is_test: 1 } : {})
+    };
+
+    console.log('→ Payload envoyé à VitePay:', JSON.stringify(payload, null, 2));
+    const response = await axios.post(VITEPAY_API, payload, { headers: { 'Content-Type': 'application/json' } });
+    console.log('← Réponse de VitePay:', response.data);
+
+    const checkoutUrl = response.data.redirect_url || response.data;
+    if (!checkoutUrl) throw new Error('URL de paiement non valide reçue de VitePay.');
+    
+    return res.status(201).json({ reservationId: order_id, checkoutUrl });
+
+  } catch (err) {
+    if (err.response) {
+      console.error('Erreur API VitePay - Statut:', err.response.status);
+      console.error('Erreur API VitePay - Corps:', err.response.data);
+    } else {
+      console.error('Erreur de requête vers VitePay:', err.message);
+    }
+    return res.status(500).json({ message: 'Impossible d’initialiser le paiement auprès de notre partenaire.' });
+  }
+};
+
+// ... Le reste du fichier (getReservationByIdPublic, getAllReservationsAdmin, etc.)
+// ne change pas. Vous n'avez qu'à remplacer la fonction createReservationAndPay.
+
+// Le reste des fonctions (pour l'admin et la confirmation) reste identique
+// ...
+exports.getReservationByIdPublic = async (req, res) => {
+    try {
+        // --- VÉRIFIEZ ET CORRIGEZ CETTE PARTIE ---
+        const reservation = await Reservation.findById(req.params.id)
+            .populate('client', 'nom prenom email') // Peuple le client
+            .populate({
+                path: 'trajet', // Peuple le trajet...
+                populate: {
+                    path: 'bus', // ...et à l'intérieur, peuple le bus
+                    model: 'Bus'
+                }
+            });
+        // ------------------------------------------
+
+        if (!reservation) {
+            return res.status(404).json({ message: "Réservation non trouvée" });
+        }
+        
+        // Vérification de sécurité
+        if (reservation.client._id.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+            return res.status(403).json({ message: "Accès non autorisé à cette réservation." });
+        }
+        
+        res.json(reservation);
+    } catch (err) {
+        console.error("Erreur getReservationByIdPublic:", err);
+        res.status(500).json({ message: err.message });
+    }
+};
+
+exports.getAllReservationsAdmin = async (req, res) => {
+  try {
+    const { statut, search, sortBy, page = 1, limit = 9 } = req.query;
+    
+    // --- Étape 1: Construire le pipeline d'agrégation ---
+    let pipeline = [
+      // Jointure avec la collection 'clients'
+      { $lookup: { from: 'clients', localField: 'client', foreignField: '_id', as: 'clientInfo' } },
+      { $unwind: '$clientInfo' },
+      // Jointure avec la collection 'trajets'
+      { $lookup: { from: 'trajets', localField: 'trajet', foreignField: '_id', as: 'trajetInfo' } },
+      { $unwind: '$trajetInfo' },
+    ];
+
+    // --- Étape 2: Construire le filtre de correspondance ($match) ---
+    let matchFilter = {};
+    if (statut) {
+      matchFilter.statut = statut;
+    }
+    if (search) {
+      matchFilter.$or = [
+        { 'clientInfo.prenom': { $regex: search, $options: 'i' } },
+        { 'clientInfo.nom': { $regex: search, $options: 'i' } },
+        { 'clientInfo.email': { $regex: search, $options: 'i' } },
+        { 'trajetInfo.villeDepart': { $regex: search, $options: 'i' } },
+        { 'trajetInfo.villeArrivee': { $regex: search, $options: 'i' } },
+      ];
+    }
+    // S'il y a des conditions de filtre, on les ajoute au pipeline
+    if (Object.keys(matchFilter).length > 0) {
+      pipeline.push({ $match: matchFilter });
+    }
+
+    // --- Étape 3: Ajouter le champ calculé pour le tri par montant ---
+    pipeline.push({
+      $addFields: {
+        montantTotal: { $multiply: ['$trajetInfo.prix', '$placesReservees'] }
+      }
+    });
+
+    // --- Étape 4: Construire l'objet de tri ($sort) ---
+    let sortStage = {};
+    switch (sortBy) {
+        case 'amount_desc': sortStage = { montantTotal: -1 }; break;
+        case 'amount_asc': sortStage = { montantTotal: 1 }; break;
+        case 'date_asc': sortStage = { dateReservation: 1 }; break;
+        case 'date_desc':
+        default: sortStage = { dateReservation: -1 }; break;
+    }
+    pipeline.push({ $sort: sortStage });
+    
+    // --- Étape 5: Utiliser $facet pour la pagination et le comptage total ---
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    pipeline.push({
+      $facet: {
+        docs: [
+          { $skip: skip },
+          { $limit: limitNum },
+          // On ajoute une dernière projection pour ne garder que les champs utiles
+          { $project: {
+              _id: 1, statut: 1, placesReservees: 1, dateReservation: 1, montantTotal: 1,
+              'client._id': '$clientInfo._id',
+              'client.prenom': '$clientInfo.prenom',
+              'client.nom': '$clientInfo.nom',
+              'trajet._id': '$trajetInfo._id',
+              'trajet.villeDepart': '$trajetInfo.villeDepart',
+              'trajet.villeArrivee': '$trajetInfo.villeArrivee',
+              'trajet.dateDepart': '$trajetInfo.dateDepart',
+              'trajet.prix': '$trajetInfo.prix',
+          }}
+        ],
+        totalCount: [
+          { $count: 'total' }
+        ]
+      }
+    });
+
+    // --- Étape 6: Exécuter le pipeline ---
+    const results = await Reservation.aggregate(pipeline);
+    
+    const docs = results[0].docs;
+    const total = results[0].totalCount[0] ? results[0].totalCount[0].total : 0;
+    
+    res.json({
+        docs,
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / limitNum)
+    });
+
+  } catch (err) {
+    console.error("Erreur getAllReservationsAdmin:", err);
+    res.status(500).json({ message: "Erreur serveur lors de la récupération des réservations." });
+  }
+};
+
+exports.updateReservationAdmin = async (req, res) => {
+  try {
+    // On ne met à jour que les champs fournis dans le body
+    const { statut } = req.body;
+    if (!statut) {
+        return res.status(400).json({ message: "Aucun statut fourni pour la mise à jour." });
+    }
+
+    const reservation = await Reservation.findByIdAndUpdate(
+      req.params.id, 
+      { statut: statut }, // On s'assure de ne changer que le statut
+      { new: true, runValidators: true }
+    );
+
+    if (!reservation) {
+      return res.status(404).json({ message: "Réservation non trouvée" });
+    }
+    
+    console.log(`Réservation ${reservation._id} mise à jour manuellement au statut: ${reservation.statut}`);
+    res.json(reservation);
+
+  } catch (err) {
+    console.error("Erreur updateReservationAdmin:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+exports.confirmReservationManually = async (req, res) => {
+    try {
+        const reservation = await Reservation.findById(req.params.id);
+        if (!reservation) {
+            return res.status(404).json({ message: "Réservation non trouvée" });
+        }
+
+        // Si la réservation est déjà confirmée, on ne fait rien
+        if (reservation.statut === 'confirmée') {
+            return res.status(400).json({ message: "Cette réservation est déjà confirmée." });
+        }
+
+        reservation.statut = 'confirmée';
+        await reservation.save();
+        
+        // C'est ici que vous ajouteriez la logique pour mettre à jour les statistiques.
+        // Pour l'instant, les statistiques sont calculées à la volée, donc le simple
+        // fait de changer le statut est suffisant. Si vous aviez une collection
+        // 'revenus_mensuels', vous l'incrémenteriez ici.
+
+        console.log(`Réservation ${reservation._id} confirmée manuellement par un admin.`);
+        res.json({ message: "Réservation confirmée avec succès.", reservation });
+
+    } catch (err) {
+        console.error("Erreur confirmReservationManually:", err);
+        res.status(500).json({ message: err.message });
+    }
+};
+
+exports.deleteReservationAdmin = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { id } = req.params;
+    
+    // 1. Trouver la réservation à supprimer
+    const reservation = await Reservation.findById(id).session(session);
+    if (!reservation) {
+      throw new Error("Réservation non trouvée.");
+    }
+
+    // 2. Si la réservation était confirmée, on libère les places
+    if (reservation.statut === 'confirmée') {
+      await Trajet.findByIdAndUpdate(
+        reservation.trajet,
+        { $inc: { placesDisponibles: reservation.placesReservees } }, // Incrémente les places
+        { session }
+      );
+      console.log(`Places libérées pour le trajet ${reservation.trajet}`);
+    }
+
+    // 3. Supprimer la réservation
+    const deletedReservation = await Reservation.findByIdAndDelete(id, { session });
+    if (!deletedReservation) {
+      // Cette erreur ne devrait pas arriver si le findById a fonctionné, mais c'est une sécurité
+      throw new Error("La suppression a échoué.");
+    }
+
+    // 4. Valider la transaction
+    await session.commitTransaction();
+    
+    res.json({ message: "Réservation supprimée avec succès et places libérées." });
+
+  } catch (err) {
+    // En cas d'erreur, tout est annulé
+    await session.abortTransaction();
+    console.error("Erreur deleteReservationAdmin:", err);
+    res.status(err.message.includes("non trouvée") ? 404 : 500).json({ message: err.message });
+  } finally {
+    session.endSession();
+  }
+};
+stats.controller.js:
+// backend/controllers/stats.controller.js
+const Reservation = require("../models/reservation.model");
+const Colis = require("../models/colis.model");
+const Client = require("../models/client.model");
+const Bus = require("../models/bus.model");
+const Chauffeur = require("../models/chauffeur.model");
+// Pas besoin de 'Trajet' pour le dashboard overview.
+
+// ====================================================================
+// --- DÉBUT DE LA CORRECTION : LOGIQUE ROBUSTIFIÉE ---
+// ====================================================================
+
+/**
+ * @desc    Récupérer les statistiques globales pour le tableau de bord admin.
+ * @route   GET /api/admin/stats/overview
+ * @access  Admin
+ */
+exports.getOverviewStats = async (req, res) => {
+    try {
+        // Ajout d'une vérification pour s'assurer que les modèles sont bien chargés.
+        // Si un modèle est manquant, cela lèvera une erreur claire.
+        if (!Bus || !Chauffeur || !Colis || !Reservation) {
+            throw new Error("Un ou plusieurs modèles de données n'ont pas pu être chargés.");
+        }
+
+        // On lance toutes les requêtes de comptage en parallèle pour une efficacité maximale
+        const [busCount, chauffeurCount, colisCount, reservationCount] = await Promise.all([
+            Bus.countDocuments(),
+            Chauffeur.countDocuments(),
+            Colis.countDocuments(),
+            Reservation.countDocuments() // On peut compter toutes les réservations ici
+        ]);
+
+        res.json({
+            busCount,
+            chauffeurCount,
+            colisCount,
+            reservationCount
+        });
+
+    } catch (err) {
+        // On log l'erreur côté serveur pour un débogage facile
+        console.error("ERREUR DANS getOverviewStats:", err.message);
+        console.error(err.stack); // Affiche la pile d'appels pour voir d'où vient l'erreur
+        
+        // On renvoie une erreur 500 claire au frontend
+        res.status(500).json({ message: "Erreur serveur critique lors de la récupération des statistiques du tableau de bord." });
+    }
+};
+
+// ====================================================================
+// --- FIN DE LA CORRECTION ---
+// ====================================================================
+
+
+// Les autres fonctions (getRevenus, getPerformanceInsights) restent inchangées.
+// Elles sont correctes.
+exports.getRevenus = async (req, res) => {
+    try {
+        const periode = req.query.periode || 'weekly'; // 'daily', 'weekly', 'monthly', 'yearly'
+        const now = new Date();
+        let startDate;
+
+        switch (periode) {
+            case 'daily':
+                startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                break;
+            case 'monthly':
+                startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+                break;
+            case 'yearly':
+                startDate = new Date(now.getFullYear(), 0, 1);
+                break;
+            case 'weekly':
+            default:
+                startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+                break;
+        }
+        startDate.setHours(0, 0, 0, 0);
+
+        const dateFilter = { $gte: startDate };
+
+        const reservationsPromise = Reservation.aggregate([
+            { $match: { statut: 'confirmée', dateReservation: dateFilter } },
+            { $lookup: { from: "trajets", localField: "trajet", foreignField: "_id", as: "trajetInfo" } },
+            { $unwind: "$trajetInfo" },
+            { $project: { date: "$dateReservation", revenue: { $multiply: ["$trajetInfo.prix", "$placesReservees"] }, count: 1 } }
+        ]);
+        const colisPromise = Colis.aggregate([
+            { $match: { date_enregistrement: dateFilter } },
+            { $project: { date: "$date_enregistrement", revenue: "$prix", count: 1 } }
+        ]);
+        const newUsersPromise = Client.countDocuments({ createdAt: dateFilter });
+
+        const [reservationData, colisData, newUsersCount] = await Promise.all([reservationsPromise, colisPromise, newUsersPromise]);
+
+        const totalRevenueBillets = reservationData.reduce((sum, item) => sum + item.revenue, 0);
+        const totalRevenueColis = colisData.reduce((sum, item) => sum + item.revenue, 0);
+        const summary = {
+            totalRevenue: totalRevenueBillets + totalRevenueColis,
+            totalRevenueBillets,
+            totalRevenueColis,
+            totalReservations: reservationData.length,
+            totalColis: colisData.length,
+            newUsersCount
+        };
+
+        const allTransactions = [
+            ...reservationData.map(r => ({ ...r, type: 'billets' })),
+            ...colisData.map(c => ({ ...c, type: 'colis' }))
+        ];
+
+        const groupedForChart = allTransactions.reduce((acc, item) => {
+            const date = new Date(item.date);
+            let key;
+            if (periode === 'yearly') {
+                key = date.toLocaleString('fr-FR', { month: 'short' });
+            } else {
+                key = date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+            }
+            
+            if (!acc[key]) acc[key] = { label: key, dateObj: date, billets: 0, colis: 0 };
+            acc[key][item.type] += item.revenue;
+            
+            return acc;
+        }, {});
+        
+        const chartData = Object.values(groupedForChart).sort((a,b) => a.dateObj - b.dateObj);
+
+        return res.json({ summary, chartData });
+        
+    } catch (err) {
+        console.error("Erreur de calcul des statistiques de revenus:", err);
+        return res.status(500).json({ message: "Erreur de calcul des statistiques de revenus." });
+    }
+};
+
+exports.getPerformanceInsights = async (req, res) => {
+    try {
+        const periode = req.query.periode || 'monthly';
+        const now = new Date();
+        let startDate;
+
+        switch (periode) {
+            case 'daily': startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate()); break;
+            case 'yearly': startDate = new Date(now.getFullYear(), 0, 1); break;
+            case 'weekly': startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6); break;
+            case 'monthly': default: startDate = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate()); break;
+        }
+        startDate.setHours(0, 0, 0, 0);
+        const dateFilter = { $gte: startDate };
+        
+        const topRoutesPromise = Reservation.aggregate([
+            { $match: { statut: 'confirmée', dateReservation: dateFilter } },
+            { $lookup: { from: 'trajets', localField: 'trajet', foreignField: '_id', as: 'trajetInfo' } },
+            { $unwind: '$trajetInfo' },
+            { $group: {
+                _id: '$trajet',
+                villeDepart: { $first: '$trajetInfo.villeDepart' },
+                villeArrivee: { $first: '$trajetInfo.villeArrivee' },
+                totalRevenue: { $sum: { $multiply: ['$trajetInfo.prix', '$placesReservees'] } },
+                reservationCount: { $sum: 1 }
+            }},
+            { $sort: { totalRevenue: -1 } },
+            { $limit: 5 },
+            { $project: { _id: 0, route: { $concat: ['$villeDepart', ' → ', '$villeArrivee'] }, totalRevenue: 1, reservationCount: 1 } }
+        ]);
+
+        const topParcelDestinationsPromise = Colis.aggregate([
+            { $match: { date_enregistrement: dateFilter } },
+            { $lookup: { from: 'trajets', localField: 'trajet', foreignField: '_id', as: 'trajetInfo' } },
+            { $unwind: '$trajetInfo' },
+            { $group: {
+                _id: '$trajetInfo.villeArrivee',
+                totalRevenue: { $sum: '$prix' },
+                colisCount: { $sum: 1 }
+            }},
+            { $sort: { totalRevenue: -1 } },
+            { $limit: 5 },
+            { $project: {
+                _id: 0,
+                destination: '$_id',
+                totalRevenue: 1,
+                colisCount: 1
+            }}
+        ]);
+
+        // --- Le pipeline pour topCompanies est complètement supprimé ---
+
+        const [topRoutes, topParcelDestinations] = await Promise.all([topRoutesPromise, topParcelDestinationsPromise]);
+
+        res.json({ topRoutes, topParcelDestinations });
+
+    } catch (err) {
+        console.error("Erreur de calcul des insights de performance:", err);
+        res.status(500).json({ message: "Erreur de calcul des insights de performance." });
+    }
+};
+tracking.controller.js:
+// backend/controllers/tracking.controller.js
+const mongoose = require('mongoose');
+const axios = require('axios');
+const Reservation = require('../models/reservation.model');
+const LiveTrip = require('../models/LiveTrip.model');
+const Trajet = require('../models/trajet.model');
+const { getDistance } = require('geolib');
+
+async function calculateORS_Route(startCoords, endCoords) {
+    const ORS_API_KEY = process.env.ORS_API_KEY;
+    if (!ORS_API_KEY) throw new Error("Clé API OpenRouteService (ORS_API_KEY) non configurée.");
+    const url = 'https://api.openrouteservice.org/v2/directions/driving-hgv/geojson';
+    const payload = {
+        coordinates: [ [startCoords.lng, startCoords.lat], [endCoords.lng, endCoords.lat] ],
+        instructions: true, instructions_format: "html"
+    };
+    const response = await axios.post(url, payload, {
+        headers: { 'Authorization': ORS_API_KEY, 'Content-Type': 'application/json' }
+    });
+    const feature = response.data.features[0];
+    if (!feature) throw new Error("Aucun itinéraire n'a pu être calculé.");
+    return {
+        geojson: feature.geometry,
+        instructions: feature.properties.segments[0].steps.map(s => ({ instruction: s.instruction })),
+        summary: {
+            distanceKm: (feature.properties.summary.distance / 1000).toFixed(2),
+            durationMin: Math.round(feature.properties.summary.duration / 60)
+        }
+    };
+}
+
+exports.startTrip = async (req, res) => {
+    try {
+        const { trajetId } = req.body;
+        const trajet = await Trajet.findById(trajetId).populate('bus');
+        if (!trajet) return res.status(404).json({ message: "Trajet non trouvé" });
+        if (!trajet.bus) return res.status(400).json({ message: "Aucun bus n'est assigné." });
+        if (!trajet.coordsDepart?.lat || !trajet.coordsArrivee?.lat) return res.status(400).json({ message: "Coordonnées manquantes." });
+        
+        let liveTrip = await LiveTrip.findOne({ trajetId });
+
+        if (!liveTrip) {
+            const routeData = await calculateORS_Route(trajet.coordsDepart, trajet.coordsArrivee);
+            liveTrip = new LiveTrip({
+                trajetId: trajet._id, busId: trajet.bus._id,
+                originCityName: trajet.villeDepart, destinationCityName: trajet.villeArrivee,
+                departureDateTime: trajet.dateDepart, routeGeoJSON: routeData.geojson,
+                routeInstructions: routeData.instructions, routeSummary: routeData.summary,
+                currentPosition: trajet.coordsDepart
+            });
+        }
+        
+        liveTrip.status = 'En cours';
+        liveTrip.lastUpdated = new Date();
+        await liveTrip.save();
+        
+        // ==========================================================
+        // === DÉBUT DE LA CORRECTION : NOTIFICATION ET MISE À JOUR D'ÉTAT
+        // ==========================================================
+        const reservations = await Reservation.find({ trajet: trajet._id, statut: 'confirmée' }).populate('client', '_id');
+        reservations.forEach(r => {
+            if (!r.client) return;
+            const recipientSocketId = req.onlineUsers[r.client._id.toString()];
+            if (recipientSocketId) {
+                // 1. Envoyer la notification de démarrage
+                req.io.to(recipientSocketId).emit("getNotification", {
+                    title: "Votre voyage a commencé !",
+                    message: `Le suivi pour ${trajet.villeDepart} → ${trajet.villeArrivee} est actif.`,
+                    link: `/tracking/map/${liveTrip._id}`
+                });
+                // 2. Envoyer l'événement de mise à jour d'état pour forcer le rafraîchissement
+                req.io.to(recipientSocketId).emit("tripStateChanged", { trajetId: trajet._id });
+            }
+        });
+        // ==========================================================
+        // === FIN DE LA CORRECTION
+        // ==========================================================
+        
+        res.status(200).json({ message: "Le voyage a démarré avec succès.", liveTrip });
+    } catch (err) {
+        console.error("Erreur startTrip:", err.response?.data || err.message);
+        res.status(500).json({ message: err.response?.data?.error?.message || err.message || "Erreur interne." });
+    }
+};
+
+// ==========================================================
+// === NOUVELLE FONCTION POUR TERMINER UN VOYAGE
+// ==========================================================
+/**
+ * @desc    Pour un admin, terminer manuellement le suivi d'un voyage.
+ * @route   POST /api/tracking/end-trip/:liveTripId
+ * @access  Admin
+ */
+exports.endTrip = async (req, res) => {
+    try {
+        const { liveTripId } = req.params;
+        const liveTrip = await LiveTrip.findById(liveTripId).populate('trajetId');
+
+        if (!liveTrip) {
+            return res.status(404).json({ message: "Voyage en cours non trouvé." });
+        }
+        
+        liveTrip.status = 'Terminé';
+        liveTrip.lastUpdated = new Date();
+        // Optionnel : Mettre la position du bus sur les coordonnées d'arrivée
+        if (liveTrip.trajetId && liveTrip.trajetId.coordsArrivee) {
+            liveTrip.currentPosition = liveTrip.trajetId.coordsArrivee;
+        }
+        await liveTrip.save();
+
+        // Envoyer une notification d'arrivée aux passagers
+        const reservations = await Reservation.find({ trajet: liveTrip.trajetId, statut: 'confirmée' }).populate('client', '_id');
+        reservations.forEach(r => {
+            if (!r.client) return;
+            const recipientSocketId = req.onlineUsers[r.client._id.toString()];
+            if (recipientSocketId) {
+                req.io.to(recipientSocketId).emit("getNotification", {
+                    title: "Votre voyage est terminé !",
+                    message: `Le bus pour ${liveTrip.originCityName} → ${liveTrip.destinationCityName} est arrivé à destination.`,
+                    link: `/dashboard`
+                });
+            }
+        });
+
+        res.status(200).json({ message: "Le voyage a été marqué comme terminé." });
+
+    } catch (err) {
+        console.error("Erreur endTrip:", err.message);
+        res.status(500).json({ message: "Erreur interne du serveur." });
+    }
+};
+
+// ==========================================================
+// === NOUVELLE FONCTION POUR NOTIFIER UN RETARD
+// ==========================================================
+/**
+ * @desc    Pour un admin, envoyer une notification de retard pour un trajet.
+ * @route   POST /api/tracking/notify-delay
+ * @access  Admin
+ */
+exports.notifyDelay = async (req, res) => {
+    try {
+        const { trajetId } = req.body;
+        const trajet = await Trajet.findById(trajetId);
+        if (!trajet) {
+            return res.status(404).json({ message: "Trajet non trouvé." });
+        }
+
+        const reservations = await Reservation.find({ trajet: trajetId, statut: 'confirmée' }).populate('client', '_id');
+        
+        if (reservations.length === 0) {
+            return res.status(200).json({ message: "Aucun passager à notifier pour ce trajet." });
+        }
+
+        let notificationCount = 0;
+        reservations.forEach(r => {
+            if (!r.client) return;
+            const recipientSocketId = req.onlineUsers[r.client._id.toString()];
+            if (recipientSocketId) {
+                notificationCount++;
+                req.io.to(recipientSocketId).emit("getNotification", {
+                    title: "Information sur votre voyage",
+                    message: `Le départ du trajet ${trajet.villeDepart} → ${trajet.villeArrivee} est retardé. Nous vous prions de patienter.`,
+                    link: `/dashboard`
+                });
+            }
+        });
+        
+        res.status(200).json({ message: `${notificationCount} passager(s) ont été notifié(s) du retard.` });
+
+    } catch (err) {
+        console.error("Erreur notifyDelay:", err.message);
+        res.status(500).json({ message: "Erreur interne du serveur." });
+    }
+};
+
+// --- Les autres fonctions restent inchangées ---
+
+exports.updateBusPosition = async (req, res) => {
+    try {
+        const { liveTripId } = req.params;
+        const { lat, lng } = req.body;
+        if (typeof lat !== 'number' || typeof lng !== 'number') {
+            return res.status(400).json({ message: "Les coordonnées lat et lng sont requises." });
+        }
+        const liveTrip = await LiveTrip.findByIdAndUpdate(
+            liveTripId,
+            { currentPosition: { lat, lng }, lastUpdated: new Date() },
+            { new: true }
+        );
+        if (!liveTrip) return res.status(404).json({ message: "Voyage en cours non trouvé." });
+        res.status(200).json(liveTrip);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+};
+
+exports.getMyNextTrip = async (req, res) => {
+    try {
+        const now = new Date();
+        const clientId = req.user._id;
+
+        const allReservations = await Reservation.find({ client: clientId, statut: 'confirmée' }).populate('trajet');
+        
+        const futureReservations = allReservations
+            .filter(r => {
+                if (!r.trajet) return false;
+                const departureDateTime = new Date(`${new Date(r.trajet.dateDepart).toISOString().split('T')[0]}T${r.trajet.heureDepart}:00`);
+                return departureDateTime >= now;
+            })
+            .sort((a, b) => new Date(a.trajet.dateDepart) - new Date(b.trajet.dateDepart));
+
+        if (futureReservations.length > 0) {
+            const nextReservation = futureReservations[0];
+            const liveTrip = await LiveTrip.findOne({ trajetId: nextReservation.trajet._id });
+            return res.json({ reservation: nextReservation, liveTrip: liveTrip || null });
+        }
+        
+        const pastReservations = allReservations
+            .filter(r => {
+                if (!r.trajet) return false;
+                const departureDateTime = new Date(`${new Date(r.trajet.dateDepart).toISOString().split('T')[0]}T${r.trajet.heureDepart}:00`);
+                const hoursSinceDeparture = (now - departureDateTime) / (1000 * 60 * 60);
+                return hoursSinceDeparture >= 0 && hoursSinceDeparture < 12; 
+            })
+            .sort((a, b) => new Date(b.trajet.dateDepart) - new Date(a.trajet.dateDepart));
+            
+        if (pastReservations.length > 0) {
+            const currentReservation = pastReservations[0];
+            const trajet = await Trajet.findById(currentReservation.trajet._id);
+
+            if (!trajet.coordsDepart?.lat || !trajet.coordsArrivee?.lat) {
+                return res.json({ reservation: currentReservation, liveTrip: null, message: "Suivi non disponible." });
+            }
+
+            let liveTrip = await LiveTrip.findOne({ trajetId: trajet._id });
+            if (!liveTrip) {
+                const routeData = await calculateORS_Route(trajet.coordsDepart, trajet.coordsArrivee);
+                liveTrip = new LiveTrip({
+                    trajetId: trajet._id, busId: trajet.bus,
+                    originCityName: trajet.villeDepart, destinationCityName: trajet.villeArrivee,
+                    departureDateTime: trajet.dateDepart, status: 'En cours',
+                    routeGeoJSON: routeData.geojson, routeInstructions: routeData.instructions,
+                    routeSummary: routeData.summary, currentPosition: trajet.coordsDepart
+                });
+            } else if (liveTrip.status !== 'Terminé') {
+                liveTrip.status = 'En cours';
+            }
+            
+            liveTrip.lastUpdated = new Date();
+            await liveTrip.save();
+
+            return res.json({ reservation: currentReservation, liveTrip });
+        }
+        
+        return res.json({ message: "Vous n'avez aucun voyage récent ou à venir." });
+    } catch (err) {
+        console.error("Erreur getMyNextTrip:", err);
+        res.status(500).json({ message: err.message });
+    }
+};
+
+exports.getLiveTripById = async (req, res) => {
+    try {
+        const { liveTripId } = req.params;
+        const liveTrip = await LiveTrip.findById(liveTripId)
+            .populate('busId', 'numero')
+            .populate('trajetId');
+
+        if (!liveTrip) return res.status(404).json({ message: "Voyage non trouvé." });
+        if (!liveTrip.trajetId) return res.status(404).json({ message: "Trajet associé introuvable." });
+        
+        const hasReservation = await Reservation.findOne({
+            client: req.user._id,
+            trajet: liveTrip.trajetId._id,
+            statut: 'confirmée'
+        });
+
+        if (!hasReservation && req.user.role !== 'admin') {
+            return res.status(403).json({ message: "Accès non autorisé." });
+        }
+
+        let tripData = liveTrip.toObject();
+        let eta = null;
+
+        if (tripData.currentPosition && tripData.trajetId?.coordsArrivee && tripData.routeSummary?.distanceKm) {
+            const remainingDistanceMeters = getDistance(
+                { latitude: tripData.currentPosition.lat, longitude: tripData.currentPosition.lng },
+                { latitude: tripData.trajetId.coordsArrivee.lat, longitude: tripData.trajetId.coordsArrivee.lng }
+            );
+            const remainingDistanceKm = remainingDistanceMeters / 1000;
+            const totalDistanceKm = parseFloat(tripData.routeSummary.distanceKm);
+            const progressPercentage = Math.min(100, Math.max(0, ((totalDistanceKm - remainingDistanceKm) / totalDistanceKm) * 100));
+
+            tripData.progress = {
+                percentage: progressPercentage.toFixed(0),
+                remainingKm: remainingDistanceKm.toFixed(1)
+            };
+            
+            if (tripData.routeSummary.durationMin > 0) {
+                const remainingDurationMin = tripData.routeSummary.durationMin * (remainingDistanceKm / totalDistanceKm);
+                const arrivalTimestamp = new Date().getTime() + (remainingDurationMin * 60 * 1000);
+                eta = new Date(arrivalTimestamp);
+            }
+        }
+        
+        tripData.eta = eta;
+        
+        res.json(tripData);
+
+    } catch (err) {
+        console.error("Erreur [getLiveTripById]:", err);
+        res.status(500).json({ message: "Erreur serveur." });
+    }
+};
+trajet.controller.js:
+// backend/controllers/trajet.controller.js
+const Trajet = require('../models/trajet.model');
+const LiveTrip = require('../models/LiveTrip.model'); 
+
+/**
+ * @desc    Rechercher des trajets pour l'interface publique (avec filtres et pagination)
+ * @route   GET /api/public/trajets/search
+ * @access  Public
+ */
+exports.searchTrajets = async (req, res) => {
+  try {
+    const { villeDepart, villeArrivee, date, sortBy = 'date', limit = 6, page = 1 } = req.query;
+    
+    // --- DÉBUT DE LA NOUVELLE LOGIQUE D'AGRÉGATION ---
+
+    // Étape 1 : On commence le pipeline d'agrégation
+    let pipeline = [];
+    
+    // Étape 2 : On combine la date et l'heure en un seul champ de type Date
+    // MongoDB peut ensuite comparer ce champ correctement
+    pipeline.push({
+      $addFields: {
+        fullDepartureDate: {
+          $dateFromString: {
+            dateString: {
+              $concat: [
+                { $dateToString: { format: "%Y-%m-%d", date: "$dateDepart" } },
+                "T",
+                "$heureDepart",
+                ":00.000Z" // On suppose que l'heure est en UTC
+              ]
+            }
+          }
+        }
+      }
+    });
+
+    // Étape 3 : On construit le filtre ($match)
+    let matchFilter = { isActive: true };
+
+    if (date) {
+      // Si une date est spécifiée, on filtre sur cette journée
+      const startDate = new Date(`${date}T00:00:00.000Z`);
+      const endDate = new Date(`${date}T23:59:59.999Z`);
+      matchFilter.fullDepartureDate = { $gte: startDate, $lte: endDate };
+    } else {
+      // Si aucune date n'est spécifiée, on filtre pour avoir tous les trajets futurs
+      matchFilter.fullDepartureDate = { $gte: new Date() };
+    }
+
+    // On ajoute les filtres de ville si présents
+    if (villeDepart) matchFilter.villeDepart = { $regex: villeDepart, $options: 'i' };
+    if (villeArrivee) matchFilter.villeArrivee = { $regex: villeArrivee, $options: 'i' };
+
+    pipeline.push({ $match: matchFilter });
+    
+    // Étape 4 : On construit le tri
+    let sortOptions = {};
+    if (sortBy === 'price_asc') sortOptions.prix = 1;
+    else if (sortBy === 'price_desc') sortOptions.prix = -1;
+    else sortOptions.fullDepartureDate = 1; // On trie sur notre nouveau champ
+
+    pipeline.push({ $sort: sortOptions });
+
+    // Étape 5 : On gère la pagination avec $facet
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    const facetPipeline = [
+      ...pipeline,
+      {
+        $facet: {
+          docs: [
+            { $skip: skip },
+            { $limit: limitNum },
+            // On peuple le bus associé
+            { $lookup: { from: 'bus', localField: 'bus', foreignField: '_id', as: 'bus' } },
+            { $unwind: { path: '$bus', preserveNullAndEmptyArrays: true } }
+          ],
+          totalCount: [
+            { $count: 'total' }
+          ]
+        }
+      }
+    ];
+
+    // On exécute l'agrégation
+    const results = await Trajet.aggregate(facetPipeline);
+    const docs = results[0].docs;
+    const total = results[0].totalCount[0] ? results[0].totalCount[0].total : 0;
+    
+    // On récupère les métadonnées (villes) en parallèle
+    const allCities = await Trajet.distinct('villeDepart');
+
+    res.json({
+      docs,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / limitNum),
+      meta: { allCities }
+    });
+
+  } catch (err) {
+    console.error("Erreur [searchTrajets]:", err);
+    res.status(500).json({ message: "Erreur serveur lors de la recherche." });
+  }
+};
+
+/**
+ * @desc    Récupérer les détails d'un seul trajet pour l'interface publique
+ * @route   GET /api/public/trajets/:id
+ * @access  Public
+ */
+exports.getTrajetByIdPublic = async (req, res) => {
+    try {
+        const trajet = await Trajet.findById(req.params.id).populate('bus');
+        if (!trajet) {
+          return res.status(404).json({ message: 'Trajet non trouvé' });
+        }
+        res.json(trajet);
+    } catch (err) {
+        console.error("Erreur [getTrajetByIdPublic]:", err);
+        res.status(500).json({ message: "Erreur serveur." });
+    }
+};
+
+/**
+ * @desc    Récupérer tous les trajets pour l'admin, avec filtres, recherche et tri.
+ * @route   GET /api/admin/trajets
+ * @access  Admin
+ */
+exports.getAllTrajetsAdmin = async (req, res) => {
+  try {
+    const { status = 'avenir', search = '', sortBy = 'date_asc', page = 1, limit = 8 } = req.query;
+    const now = new Date();
+
+    let searchFilter = {};
+    if (search) {
+        searchFilter = {
+            $or: [
+                { villeDepart: { $regex: search, $options: 'i' } },
+                { villeArrivee: { $regex: search, $options: 'i' } },
+                { compagnie: { $regex: search, $options: 'i' } }
+            ]
+        };
+    }
+    
+    const trajetsCorrespondants = await Trajet.find(searchFilter).populate('bus', 'numero etat').lean();
+    const trajetIds = trajetsCorrespondants.map(t => t._id);
+    
+    const liveTrips = await LiveTrip.find({ trajetId: { $in: trajetIds } }).lean();
+    const liveTripMap = new Map(liveTrips.map(lt => [lt.trajetId.toString(), lt]));
+
+    let filteredTrajets = [];
+    trajetsCorrespondants.forEach(trajet => {
+        const liveTrip = liveTripMap.get(trajet._id.toString());
+        const departureDateTime = new Date(`${new Date(trajet.dateDepart).toISOString().split('T')[0]}T${trajet.heureDepart}:00Z`);
+        const trajetWithLiveTrip = { ...trajet, liveTrip };
+        
+        let conditionMet = false;
+        switch (status) {
+            case 'avenir':
+                if (departureDateTime >= now && (!liveTrip || liveTrip.status === 'À venir')) {
+                    conditionMet = true;
+                }
+                break;
+            case 'encours':
+                if (liveTrip && liveTrip.status === 'En cours') {
+                    conditionMet = true;
+                }
+                break;
+            case 'passes':
+                if (
+                    !trajet.isActive ||
+                    (liveTrip && ['Terminé', 'Annulé'].includes(liveTrip.status)) ||
+                    (departureDateTime < now && (!liveTrip || liveTrip.status !== 'En cours'))
+                ) {
+                    conditionMet = true;
+                }
+                break;
+            case 'tous':
+            default:
+                conditionMet = true;
+                break;
+        }
+
+        if (conditionMet) {
+            filteredTrajets.push(trajetWithLiveTrip);
+        }
+    });
+    
+    filteredTrajets.sort((a, b) => {
+        const dateA = new Date(a.dateDepart);
+        const dateB = new Date(b.dateDepart);
+        switch (sortBy) {
+            case 'price_asc': return a.prix - b.prix;
+            case 'price_desc': return b.prix - a.prix;
+            case 'date_desc': return dateB - dateA;
+            case 'date_asc':
+            default: return dateA - dateB;
+        }
+    });
+
+    const total = filteredTrajets.length;
+    const paginatedTrajets = filteredTrajets.slice((parseInt(page) - 1) * parseInt(limit), parseInt(page) * parseInt(limit));
+
+    res.json({
+        docs: paginatedTrajets,
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / parseInt(limit))
+    });
+
+  } catch (err) {
+    console.error("Erreur getAllTrajetsAdmin:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * @desc    Récupérer tous les trajets futurs et actifs pour les formulaires admin.
+ * @route   GET /api/admin/trajets/available-for-colis
+ * @access  Admin
+ */
+exports.getAvailableTrajetsForColis = async (req, res) => {
+  try {
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    const trajetsDisponibles = await Trajet.find({
+      isActive: true,
+      dateDepart: { $gte: today }
+    }).sort({ dateDepart: 1 });
+
+    res.json(trajetsDisponibles);
+
+  } catch (err) {
+    console.error("Erreur [getAvailableTrajetsForColis]:", err);
+    res.status(500).json({ message: "Erreur serveur lors de la récupération des trajets disponibles." });
+  }
+};
+
+/**
+ * @desc    Annuler un trajet (le rend inactif et met à jour le LiveTrip si besoin)
+ * @route   PUT /api/admin/trajets/:id/cancel
+ * @access  Admin
+ */
+exports.cancelTrajet = async (req, res) => {
+  try {
+    const trajet = await Trajet.findByIdAndUpdate(
+      req.params.id, 
+      { isActive: false }, 
+      { new: true }
+    );
+
+    if (!trajet) {
+      return res.status(404).json({ message: "Trajet non trouvé" });
+    }
+
+    await LiveTrip.findOneAndUpdate(
+        { trajetId: req.params.id },
+        { status: 'Annulé' }
+    );
+
+    res.json({ message: "Trajet annulé avec succès.", trajet });
+  } catch (err) {
+    console.error("Erreur cancelTrajet:", err);
+    res.status(500).json({ message: "Erreur serveur lors de l'annulation du trajet." });
+  }
+};
+
+/**
+ * @desc    Créer un nouveau trajet
+ * @route   POST /api/admin/trajets
+ * @access  Admin
+ */
+exports.createTrajet = async (req, res) => {
+  try {
+    const newTrajet = new Trajet(req.body);
+    const savedTrajet = await newTrajet.save();
+    res.status(201).json(savedTrajet);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+/**
+ * @desc    Mettre à jour un trajet existant
+ * @route   PUT /api/admin/trajets/:id
+ * @access  Admin
+ */
+exports.updateTrajet = async (req, res) => {
+  try {
+    const updatedTrajet = await Trajet.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+    if (!updatedTrajet) {
+      return res.status(404).json({ message: "Trajet non trouvé" });
+    }
+    res.json(updatedTrajet);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+/**
+ * @desc    Supprimer un trajet
+ * @route   DELETE /api/admin/trajets/:id
+ * @access  Admin
+ */
+exports.deleteTrajet = async (req, res) => {
+  try {
+    const deletedTrajet = await Trajet.findByIdAndDelete(req.params.id);
+    if (!deletedTrajet) {
+      return res.status(404).json({ message: "Trajet non trouvé" });
+    }
+    res.json({ message: "Trajet supprimé avec succès" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+ville.controller.js:
+// controllers/ville.controller.js
+const { Ville, Tarif } = require("../models/ville.model");
+
+// Create Ville
+exports.createVille = async (req, res) => {
+  try {
+    const v = await Ville.create(req.body);
+    res.status(201).json(v);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+// Get all Villes
+exports.getVilles = async (req, res) => {
+  try {
+    const list = await Ville.find();
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Update Ville
+exports.updateVille = async (req, res) => {
+  try {
+    const v = await Ville.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+    if (!v) return res.status(404).json({ message: "Ville non trouvée" });
+    res.json(v);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+// Delete Ville
+exports.deleteVille = async (req, res) => {
+  try {
+    const v = await Ville.findByIdAndDelete(req.params.id);
+    if (!v) return res.status(404).json({ message: "Ville non trouvée" });
+    res.json({ message: "Ville supprimée" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Create Tarif
+exports.createTarif = async (req, res) => {
+  try {
+    const t = await Tarif.create(req.body);
+    res.status(201).json(t);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+// Get all Tarifs
+exports.getTarifs = async (req, res) => {
+  try {
+    const list = await Tarif.find().populate("depart arrivee");
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Update Tarif
+exports.updateTarif = async (req, res) => {
+  try {
+    const t = await Tarif.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+    if (!t) return res.status(404).json({ message: "Tarif non trouvé" });
+    res.json(t);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+// Delete Tarif
+exports.deleteTarif = async (req, res) => {
+  try {
+    const t = await Tarif.findByIdAndDelete(req.params.id);
+    if (!t) return res.status(404).json({ message: "Tarif supprimé" });
+    res.json({ message: "Tarif supprimé" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+vitepay.controller.js:
+// backend/controllers/vitepay.controller.js
+const crypto = require('crypto');
+const Reservation = require('../models/reservation.model');
+const Trajet = require('../models/trajet.model');
+
+exports.handleCallback = async (req, res) => {
+  const {
+    order_id,
+    authenticity,
+    success,
+    amount_100,
+    currency_code
+  } = req.body;
+
+  try {
+    // 1. Vérifier l'authenticité du callback
+    const raw = `${order_id};${amount_100};${currency_code};${process.env.VITEPAY_API_SECRET}`.toUpperCase();
+    const expected = crypto.createHash('sha1').update(raw).digest('hex').toUpperCase();
+
+    if (expected !== authenticity) {
+      console.warn(`[VitePay] Invalid authenticity for order ${order_id}`);
+      return res.status(400).send('Invalid authenticity');
+    }
+
+    // 2. Mettre à jour la réservation
+    const reservation = await Reservation.findById(order_id);
+    if (!reservation) {
+        console.error(`[VitePay] Reservation with ID ${order_id} not found.`);
+        return res.status(404).send('Reservation not found');
+    }
+
+    if (success === '1') {
+      // Paiement réussi
+      reservation.statut = 'confirmée';
+      await reservation.save();
+      console.log(`[VitePay] Paiement confirmé pour la réservation ${order_id}`);
+    } else {
+      // Paiement échoué
+      reservation.statut = 'annulée';
+      await reservation.save();
+      
+      // Remettre les places dans le trajet
+      await Trajet.findByIdAndUpdate(reservation.trajet, {
+          $inc: { placesDisponibles: reservation.placesReservees }
+      });
+      console.log(`[VitePay] Paiement échoué pour la réservation ${order_id}. Places remises.`);
+    }
+
+    // Répondre 200 OK à VitePay pour acquitter la notification
+    res.status(200).send('OK');
+
+  } catch (error) {
+    console.error(`[VitePay] Erreur lors du traitement du callback pour ${order_id}:`, error);
+    // Même en cas d'erreur interne, il est parfois préférable de répondre 200 pour éviter que VitePay ne renvoie la notification en boucle.
+    res.status(500).send('Internal Server Error');
+  }
+};
+middlewares:
+auth.middleware.js:
+// backend/middlewares/auth.middleware.js
+const jwt = require("jsonwebtoken");
+const Client = require("../models/client.model");
+
+// Protège les routes, vérifie si l'utilisateur est connecté
+exports.protect = async (req, res, next) => {
+  let token;
+
+  if (
+    req.headers.authorization &&
+    req.headers.authorization.startsWith("Bearer")
+  ) {
+    try {
+      // Récupère le token du header
+      token = req.headers.authorization.split(" ")[1];
+
+      // Vérifie le token
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+      // Récupère l'utilisateur depuis la DB et l'attache à la requête
+      req.user = await Client.findById(decoded.id).select("-mot_de_passe");
+
+      if (!req.user) {
+         return res.status(401).json({ message: "Non autorisé, utilisateur non trouvé" });
+      }
+
+      next();
+    } catch (error) {
+      return res.status(401).json({ message: "Non autorisé, token invalide" });
+    }
+  }
+
+  if (!token) {
+    return res.status(401).json({ message: "Non autorisé, pas de token" });
+  }
+};
+
+// Vérifie si l'utilisateur connecté est un admin
+exports.isAdmin = (req, res, next) => {
+  if (req.user && req.user.role === "admin") {
+    next();
+  } else {
+    res.status(403).json({ message: "Accès refusé. Rôle administrateur requis." });
+  }
+};
+role.js:
+// Vérifie que l'utilisateur connecté est admin
+exports.isAdmin = (req, res, next) => {
+  if (req.client && req.client.role === "admin") {
+    return next();
+  }
+  return res
+    .status(403)
+    .json({ message: "Accès refusé: réservé aux administrateurs" });
+};
+
+models:
+bus.model.js:
+
+// backend/models/bus.model.js
+const mongoose = require("mongoose");
+
+const busSchema = new mongoose.Schema(
+  {
+    numero: { type: String, required: true, unique: true },
+    etat: {
+      type: String,
+      required: true,
+      enum: ["en service", "maintenance", "hors service"],
+      default: "en service",
+    },
+    capacite: { type: Number, default: 50, required: true },
+  },
+  { timestamps: true }
+);
+
+module.exports = mongoose.model("Bus", busSchema);
+
+chauffeur.model.js:
+// backend/models/chauffeur.model.js
+const mongoose = require("mongoose");
+
+const chauffeurSchema = new mongoose.Schema(
+  {
+    prenom: { type: String, required: true },
+    nom: { type: String, required: true },
+    telephone: { type: String, required: true, maxlength: 12 },
+    bus: { type: mongoose.Schema.Types.ObjectId, ref: "Bus", default: null },
+  },
+  { timestamps: true }
+);
+
+module.exports = mongoose.model("Chauffeur", chauffeurSchema);
+client.model.js:
+// backend/models/client.model.js
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+
+const clientSchema = new mongoose.Schema(
+  {
+    prenom: { type: String, required: true },
+    nom: { type: String, required: true },
+    email: { type: String, required: true, unique: true, lowercase: true },
+    mot_de_passe: { type: String, required: true },
+    telephone: { type: String },
+    role: { type: String, enum: ["client", "admin"], default: "client" },
+  },
+  { timestamps: true }
+);
+
+// Hachage du mot de passe avant de sauvegarder
+clientSchema.pre("save", async function (next) {
+  if (!this.isModified("mot_de_passe")) {
+    return next();
+  }
+  const salt = await bcrypt.genSalt(10);
+  this.mot_de_passe = await bcrypt.hash(this.mot_de_passe, salt);
+  next();
+});
+
+// Méthode pour comparer les mots de passe
+clientSchema.methods.matchPassword = async function (enteredPassword) {
+  return await bcrypt.compare(enteredPassword, this.mot_de_passe);
+};
+
+module.exports = mongoose.model("Client", clientSchema);
+colis.model.js:
+// backend/models/colis.model.js
+const mongoose = require("mongoose");
+
+/**
+ * Génère un code de suivi alphanumérique unique et facile à lire.
+ * @param {number} length - La longueur du code à générer.
+ * @returns {string} Le code généré.
+ */
+function generateCode(length = 8) {
+  const chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"; // Caractères sans ambiguïté (0/O, 1/I retirés)
+  let code = "";
+  for (let i = 0; i < length; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
+/**
+ * Calcule le prix du transport d'un colis en fonction de son poids.
+ * @param {number} poids - Le poids du colis en kg.
+ * @returns {number} Le prix calculé en FCFA.
+ */
+function calculPrix(poids) {
+  const BASE_FEE = 500; // Frais de dossier fixes
+  const PRICE_PER_KG = 300; // Prix par kilogramme
+  return BASE_FEE + (poids * PRICE_PER_KG);
+}
+
+
+const colisSchema = new mongoose.Schema({
+  // Référence obligatoire au trajet sur lequel le colis voyagera
+  trajet: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Trajet', 
+    required: [true, "Un trajet doit être associé au colis."]
+  },
+  
+  description: { type: String, required: true },
+  poids: { type: Number, required: true },
+  prix: { type: Number }, // Calculé automatiquement
+
+  statut: {
+    type: String,
+    enum: ["enregistré", "encours", "arrivé", "annulé"], // Statuts possibles
+    default: "enregistré",
+  },
+  
+  code_suivi: { type: String, unique: true },
+  
+  // Informations sur l'expéditeur
+  expediteur_nom: { type: String, required: true },
+  expediteur_telephone: { type: String, required: true },
+  expediteur_email: { type: String, index: true }, // Pour les notifications
+  
+  // Informations sur le destinataire
+  destinataire_nom: { type: String, required: true },
+  destinataire_telephone: { type: String, required: true },
+  
+  date_enregistrement: { type: Date, default: Date.now },
+}, { timestamps: true });
+
+
+// Hook Mongoose qui s'exécute avant chaque sauvegarde
+colisSchema.pre("save", async function (next) {
+  // Si c'est un nouveau document, générer un code de suivi unique
+  if (this.isNew) {
+    let code;
+    let exists = true;
+    while (exists) {
+      code = generateCode();
+      exists = await this.constructor.exists({ code_suivi: code });
+    }
+    this.code_suivi = code;
+  }
+
+  // Si le poids a été modifié (ou si c'est un nouveau document), recalculer le prix
+  if (this.isModified('poids') || this.isNew) {
+    this.prix = calculPrix(this.poids);
+  }
+
+  next(); // Poursuivre l'opération de sauvegarde
+});
+
+module.exports = mongoose.model("Colis", colisSchema);
+LiveTrip.model.js:
+// backend/models/LiveTrip.model.js
+const mongoose = require('mongoose');
+
+const pointSchema = new mongoose.Schema({
+    lat: { type: Number, required: true },
+    lng: { type: Number, required: true }
+}, { _id: false });
+
+const liveTripSchema = new mongoose.Schema({
+  trajetId: { type: mongoose.Schema.Types.ObjectId, ref: 'Trajet', required: true, unique: true },
+  busId: { type: mongoose.Schema.Types.ObjectId, ref: 'Bus', required: true },
+  
+  originCityName: { type: String, required: true },
+  destinationCityName: { type: String, required: true },
+  departureDateTime: { type: Date, required: true },
+  
+  status: { type: String, enum: ['À venir', 'En cours', 'Terminé', 'Annulé'], default: 'À venir' },
+  currentPosition: { type: pointSchema },
+  
+  // --- CHAMPS POUR L'ITINÉRAIRE CALCULÉ ---
+  routeGeoJSON: { type: Object },
+  routeInstructions: [ { instruction: String } ],
+  routeSummary: {
+      distanceKm: Number,
+      durationMin: Number
+  },
+  // ----------------------------------------
+  lastUpdated: { type: Date }
+}, { timestamps: true });
+
+module.exports = mongoose.model('LiveTrip', liveTripSchema);
+reservation.model.js:
+// backend/models/reservation.model.js
+const mongoose = require('mongoose');
+
+const reservationSchema = new mongoose.Schema({
+  trajet: { type: mongoose.Schema.Types.ObjectId, ref: 'Trajet', required: true },
+  client: { type: mongoose.Schema.Types.ObjectId, ref: 'Client', required: true },
+  passagers: [{
+    nom: { type: String, required: true },
+    prenom: { type: String, required: true },
+  }],
+  placesReservees: { type: Number, required: true, min: 1 },
+  dateReservation: { type: Date, default: Date.now },
+  statut: {
+    type: String,
+    enum: ['en_attente', 'confirmée', 'annulée'],
+    default: 'en_attente'
+  },
+  paymentId: { type: String },
+}, { timestamps: true });
+
+module.exports = mongoose.model('Reservation', reservationSchema);
+trajet.model.js:
+// backend/models/trajet.model.js
+const mongoose = require('mongoose');
+const pointSchema = new mongoose.Schema({
+    lat: { type: Number, required: true },
+    lng: { type: Number, required: true },
+}, { _id: false });
+const trajetSchema = new mongoose.Schema({
+  villeDepart: { type: String, required: true },
+  villeArrivee: { type: String, required: true },
+  
+  coordsDepart: { type: pointSchema, required: true },
+  coordsArrivee: { type: pointSchema, required: true },
+
+  // --- CHAMP SUPPRIMÉ ---
+  // compagnie: { type: String, required: true }, 
+
+  dateDepart: { type: Date, required: true },
+  heureDepart: { type: String, required: true },
+  prix: { type: Number, required: true },
+  placesDisponibles: { type: Number, required: true },
+  bus: { type: mongoose.Schema.Types.ObjectId, ref: 'Bus' },
+  isActive: { type: Boolean, default: true }
+}, { timestamps: true });
+
+module.exports = mongoose.model('Trajet', trajetSchema);
+ville.model.js:
+// backend/models/ville.model.js
+const mongoose = require("mongoose");
+
+const villeSchema = new mongoose.Schema(
+  {
+    nom: { type: String, required: true, unique: true },
+  },
+  { timestamps: true }
+);
+
+const tarifSchema = new mongoose.Schema(
+  {
+    depart: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Ville",
+      required: true,
+    },
+    arrivee: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Ville",
+      required: true,
+    },
+    prix: { type: Number, required: true },
+  },
+  { timestamps: true }
+);
+
+const Ville = mongoose.model("Ville", villeSchema);
+const Tarif = mongoose.model("Tarif", tarifSchema);
+
+module.exports = { Ville, Tarif };
+routes:
+admin:
+bus.routes.js:
+// backend/routes/admin/bus.routes.js
+const express = require('express');
+const router = express.Router();
+// --- CORRECTION : Importer la nouvelle fonction ---
+const { createBus, getBuses, getBusById, updateBus, deleteBus, getAvailableBuses } = require('../../controllers/bus.controller');
+const { protect, isAdmin } = require('../../middlewares/auth.middleware');
+
+// Protège toutes les routes de ce fichier
+router.use(protect, isAdmin);
+
+// --- CORRECTION : Ajouter la nouvelle route ---
+router.get('/available', getAvailableBuses);
+// ------------------------------------------
+
+// Route principale pour la liste paginée
+router.route('/')
+  .post(createBus)
+  .get(getBuses);
+
+// Routes pour un bus spécifique
+router.route('/:id')
+  .get(getBusById)
+  .put(updateBus)
+  .delete(deleteBus);
+
+module.exports = router;
+chauffeur.routes.js:
+// backend/routes/admin/chauffeur.routes.js
+const express = require('express');
+const router = express.Router();
+const { createChauffeur, getChauffeurs, getChauffeurById, updateChauffeur, deleteChauffeur } = require('../../controllers/chauffeur.controller');
+const { protect, isAdmin } = require('../../middlewares/auth.middleware');
+
+router.use(protect, isAdmin);
+
+router.route('/')
+  .post(createChauffeur)
+  .get(getChauffeurs);
+
+router.route('/:id')
+  .get(getChauffeurById)
+  .put(updateChauffeur)
+  .delete(deleteChauffeur);
+
+module.exports = router;
+client.routes.js:
+// routes/client.routes.js
+const express = require("express");
+const router = express.Router();
+
+const {
+  inscrireClient,
+  connecterClient,
+  profilClient,
+  // inscrireClientAdmin, // Commentez ou supprimez si la fonction contrôleur est supprimée
+} = require("../../controllers/client.controller");
+
+const protect = require("../middlewares/auth");
+const { isAdmin } = require("../../middlewares/role");
+
+// ---------- Routes PUBLIQUES ----------
+// L'inscription se fait maintenant via cette route unique, le rôle est déterminé par l'email
+router.post("/register", inscrireClient); // POST /api/clients/register
+router.post("/login", connecterClient);   // POST /api/clients/login
+
+// ---------- Routes PROTÉGÉES (token requis) ----------
+router.get("/profile", protect, profilClient); // GET /api/clients/profile
+
+// Route pour tester l'accès admin (peut rester si utile pour vos tests)
+router.get("/admin-only", protect, isAdmin, (req, res) => {
+  res.json({ message: "Accès Admin OK" });
+});
+
+// La route pour inscrire un admin via une autre route devient redondante
+// router.post("/register-admin", protect, isAdmin, inscrireClientAdmin); // Commentez ou supprimez
+
+module.exports = router;
+colis.routes.js:
+// backend/routes/admin/colis.routes.js
+const express = require('express');
+const router = express.Router();
+const { 
+  creerColis, 
+  getAllColis, 
+  getColisById, 
+  updateStatutColis, 
+  updateColis,
+  deleteColis // <-- Importer la nouvelle fonction
+} = require('../../controllers/colis.controller');
+const { protect, isAdmin } = require('../../middlewares/auth.middleware');
+
+router.use(protect, isAdmin);
+
+router.route('/')
+  .post(creerColis)
+  .get(getAllColis);
+
+router.route('/:id')
+  .get(getColisById)
+  .put(updateColis)
+  .delete(deleteColis); // <-- AJOUTER CETTE LIGNE
+
+router.put('/:id/statut', updateStatutColis);
+
+module.exports = router;
+paiement.routes.js:
+// backend/routes/admin/paiement.routes.js
+const express = require('express');
+const router = express.Router();
+const { getPaiements } = require('../../controllers/paiement.controller');
+const { protect, isAdmin } = require('../../middlewares/auth.middleware');
+
+// Protège toutes les routes de ce fichier. Seul un admin peut y accéder.
+router.use(protect, isAdmin);
+
+// La route GET '/' correspondra à /api/admin/paiements/
+router.get('/', getPaiements);
+
+module.exports = router;
+reservation.routes.js:
+// backend/routes/admin/reservation.routes.js
+const express = require('express');
+const router = express.Router();
+const { 
+    getAllReservationsAdmin, 
+    updateReservationAdmin, 
+    deleteReservationAdmin,
+    confirmReservationManually // <-- Importer la nouvelle fonction
+} = require('../../controllers/reservation.controller');
+const { protect, isAdmin } = require('../../middlewares/auth.middleware');
+
+router.use(protect, isAdmin);
+
+router.get('/all', getAllReservationsAdmin);
+
+// --- NOUVELLE ROUTE ---
+router.post('/:id/confirm', confirmReservationManually);
+
+router.route('/:id')
+  .put(updateReservationAdmin) // Pour la modification simple depuis le formulaire
+  .delete(deleteReservationAdmin);
+
+module.exports = router;
+stats.routes.js:
+
+// backend/routes/admin/stats.routes.js
+const express = require('express');
+const router = express.Router();
+// --- CORRECTION : Importer la nouvelle fonction ---
+const { getRevenus, getPerformanceInsights, getOverviewStats } = require('../../controllers/stats.controller');
+const { protect, isAdmin } = require('../../middlewares/auth.middleware');
+
+router.use(protect, isAdmin);
+
+// --- CORRECTION : AJOUT DE LA NOUVELLE ROUTE ---
+router.get('/overview', getOverviewStats);
+// ---------------------------------------------
+
+router.get('/revenus', getRevenus);
+router.get('/performance', getPerformanceInsights);
+
+module.exports = router;
+trajet.routes.js:
+/const express = require('express');
+const router = express.Router();
+// --- DÉBUT DE LA CORRECTION ---
+const { 
+  createTrajet, 
+  getAllTrajetsAdmin, 
+  updateTrajet, 
+  deleteTrajet,
+  getAvailableTrajetsForColis,
+  cancelTrajet // <-- 1. Importer la fonction d'annulation
+} = require('../../controllers/trajet.controller');
+// --- FIN DE LA CORRECTION ---
+const { protect, isAdmin } = require('../../middlewares/auth.middleware');
+
+router.use(protect, isAdmin);
+
+router.get('/available-for-colis', getAvailableTrajetsForColis);
+
+router.route('/')
+  .post(createTrajet)
+  .get(getAllTrajetsAdmin);
+
+// --- DÉBUT DE LA CORRECTION ---
+// 2. Ajouter la route spécifique pour l'annulation AVANT la route générique /:id
+// C'est une bonne pratique de mettre les routes les plus spécifiques en premier.
+router.put('/:id/cancel', cancelTrajet); 
+// --- FIN DE LA CORRECTION ---
+
+router.route('/:id')
+  .put(updateTrajet)
+  .delete(deleteTrajet);
+
+module.exports = router;
+
+ville.routes.js:
+// backend/routes/admin/ville.routes.js
+const express = require('express');
+const router = express.Router();
+const { createVille, getVilles, updateVille, deleteVille, createTarif, getTarifs, updateTarif, deleteTarif } = require('../../controllers/ville.controller');
+const { protect, isAdmin } = require('../../middlewares/auth.middleware');
+
+router.use(protect, isAdmin);
+
+// Routes pour les Villes
+router.route('/villes')
+  .post(createVille)
+  .get(getVilles);
+
+router.route('/villes/:id')
+  .put(updateVille)
+  .delete(deleteVille);
+
+// Routes pour les Tarifs
+router.route('/tarifs')
+  .post(createTarif)
+  .get(getTarifs);
+
+router.route('/tarifs/:id')
+  .put(updateTarif)
+  .delete(deleteTarif);
+
+module.exports = router;
+
+public :
+colis.routes.js:
+// backend/routes/public/colis.routes.js
+const express = require('express');
+const router = express.Router();
+const { getColisByCode } = require('../../controllers/colis.controller');
+const { protect } = require('../../middlewares/auth.middleware'); // Importer le middleware de protection
+
+// --- ROUTE MODIFIÉE ---
+// On ajoute le middleware 'protect' pour s'assurer que seul un utilisateur connecté peut l'appeler.
+router.get('/track/:code', protect, getColisByCode);
+// --------------------
+
+module.exports = router;
+
+trajet.routes.js:
+// backend/routes/public/trajet.routes.js
+const express = require('express');
+const router = express.Router();
+const { searchTrajets, getTrajetByIdPublic } = require('../../controllers/trajet.controller');
+
+// Routes publiques pour la recherche de trajets
+router.get('/search', searchTrajets);
+router.get('/:id', getTrajetByIdPublic);
+
+module.exports = router;
+auth.routes.js:
+// backend/routes/auth.routes.js
+const express = require('express');
+const router = express.Router();
+const { register, login, getUserProfile } = require('../controllers/auth.controller');
+const { protect } = require('../middlewares/auth.middleware');
+const { body } = require("express-validator"); // <-- Importer 'body'
+
+// --- NOUVELLE PARTIE : RÈGLES DE VALIDATION ---
+const registerValidationRules = [
+  body('email')
+    .isEmail().withMessage("Veuillez fournir une adresse email valide."),
+  
+  body('mot_de_passe')
+    .isLength({ min: 8 }).withMessage("Le mot de passe doit contenir au moins 8 caractères."),
+  
+  body('telephone')
+    .optional({ checkFalsy: true }) // Le champ est optionnel
+    .isLength({ min: 8, max: 8 }).withMessage("Le numéro de téléphone doit contenir exactement 8 chiffres.")
+    .isNumeric().withMessage("Le numéro de téléphone ne doit contenir que des chiffres."),
+
+  body('prenom')
+    .not().isEmpty().trim().escape().withMessage("Le prénom est requis."),
+  
+  body('nom')
+    .not().isEmpty().trim().escape().withMessage("Le nom est requis."),
+];
+// ---------------------------------------------
+
+// La route d'inscription utilise maintenant les règles de validation avant d'appeler le contrôleur
+router.post('/register', registerValidationRules, register);
+
+router.post('/login', login);
+router.get('/profile', protect, getUserProfile);
+
+module.exports = router;
+dashboard.routes.js:
+// backend/routes/dashboard.routes.js
+const express = require('express');
+const router = express.Router();
+const { protect } = require('../middlewares/auth.middleware');
+const { getClientDashboardData } = require('../controllers/dashboard.controller');
+
+router.get('/client-data', protect, getClientDashboardData);
+
+module.exports = router;
+reservation.routes.js:
+// backend/routes/reservation.routes.js
+const express = require('express');
+const router = express.Router();
+const { protect } = require('../middlewares/auth.middleware');
+const {
+    createReservationAndPay,
+    getReservationByIdPublic,
+} = require('../controllers/reservation.controller');
+
+// Un client connecté peut créer une réservation et voir sa confirmation
+router.post('/', protect, createReservationAndPay);
+router.get('/:id', protect, getReservationByIdPublic);
+
+module.exports = router;
+tracking.routes.js:
+// mybusback/routes/tracking.routes.js (CODE CORRIGÉ)
+
+const express = require('express');
+const router = express.Router();
+const axios = require('axios'); // <--- 1. AJOUTER CETTE LIGNE
+const { protect, isAdmin } = require('../middlewares/auth.middleware');
+const { 
+    startTrip, 
+    updateBusPosition, 
+    getMyNextTrip,
+    getLiveTripById
+} = require('../controllers/tracking.controller');
+
+// Route pour qu'un client récupère son prochain voyage (protégée par login)
+router.get('/my-next-trip', protect, getMyNextTrip);
+
+// Route pour récupérer les détails d'un voyage en direct par son ID
+router.get('/live/:liveTripId', protect, getLiveTripById);
+
+// Route pour qu'un admin démarre un voyage
+router.post('/start-trip', protect, isAdmin, startTrip);
+
+// Route pour mettre à jour la position d'un bus
+router.post('/live/:liveTripId/update-position', protect, isAdmin, updateBusPosition);
+
+// --- 2. LE RESTE DE LA ROUTE EST MAINTENANT CORRECT ---
+router.post('/calculate-route', protect, async (req, res) => {
+    try {
+        const { pointA, pointB } = req.body;
+        if (!pointA || !pointB || !pointA.lat || !pointA.lng || !pointB.lat || !pointB.lng) {
+            return res.status(400).json({ message: "Les coordonnées de départ et d'arrivée sont requises." });
+        }
+
+        const ORS_API_KEY = process.env.ORS_API_KEY;
+        const ORS_API_URL = 'https://api.openrouteservice.org/v2/directions/driving-hgv/geojson';
+
+        const payload = {
+            coordinates: [ [pointA.lng, pointA.lat], [pointB.lng, pointB.lat] ],
+            instructions: true,
+            instructions_format: "html"
+        };
+
+        const response = await axios.post(ORS_API_URL, payload, {
+            headers: { 'Authorization': ORS_API_KEY, 'Content-Type': 'application/json' }
+        });
+
+        const feature = response.data.features[0];
+        const summary = feature.properties.summary;
+        const steps = feature.properties.segments[0].steps;
+
+        res.json({
+            distanceKm: (summary.distance / 1000).toFixed(2),
+            durationMin: Math.round(summary.duration / 60),
+            geojson: feature.geometry,
+            instructions: steps,
+        });
+
+    } catch (error) {
+        console.error("Erreur ORS:", error.response?.data || error.message);
+        res.status(500).json({ message: "Erreur lors du calcul de l'itinéraire." });
+    }
+});
+
+module.exports = router;
+vitepay.routes.js:
+// backend/routes/vitepay.routes.js
+const express = require('express');
+const router = express.Router();
+const { handleCallback } = require('../controllers/vitepay.controller');
+
+router.post('/callback', handleCallback);
+
+module.exports = router;
+.env:
+BACKEND_URL=https://mybusback.onrender.com
+FRONTEND_URL=*
+# MongoDB
+MONGO_URI=mongodb+srv://mohxl:Mohxl.777@cluster0.vapi0jr.mongodb.net/transport_mali?retryWrites=true&w=majority
+
+ORS_API_KEY=5b3ce3597851110001cf62489a3c23ae459c4e319c432ff8bb92b8fc
+# Serveur
+PORT=5000
+HOST=0.0.0.0
+NODE_ENV=production
+
+# CORS 
+CORS_ORIGIN=*
+
+# Sécurité
+RATE_LIMIT_WINDOW=15
+RATE_LIMIT_MAX=100
+
+JWT_SECRET=VOTRE_SECRET_JWT_TRES_SECURISE
+
+VITEPAY_API_KEY=5CMQT20wKowIKg
+VITEPAY_API_SECRET=9fe36ed88b9b0677cbe479f5c4129ddc
+
+app.js:
+
+// backend/app.js
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const http = require('http');
+const { Server } = require("socket.io");
+const connectDB = require('./config/db');
+
+// --- Connexion à la base de données ---
+connectDB();
+
+const app = express();
+const server = http.createServer(app);
+
+// --- Configuration de Socket.IO ---
+const io = new Server(server, {
+  cors: {
+    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    methods: ["GET", "POST"]
+  }
+});
+
+let onlineUsers = {};
+io.on('connection', (socket) => {
+  console.log(`🔌 Utilisateur connecté: ${socket.id}`);
+  socket.on('addNewUser', (userId) => {
+    onlineUsers[userId] = socket.id;
+    console.log("Utilisateurs en ligne:", onlineUsers);
+  });
+  socket.on('disconnect', () => {
+    for (const userId in onlineUsers) {
+      if (onlineUsers[userId] === socket.id) delete onlineUsers[userId];
+    }
+    console.log(`🔥 Utilisateur déconnecté: ${socket.id}`);
+  });
+});
+
+// --- Middlewares Globaux ---
+app.use(express.json());
+app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
+app.use(helmet());
+app.use(morgan('dev'));
+
+app.use((req, res, next) => {
+    req.io = io;
+    req.onlineUsers = onlineUsers;
+    next();
+});
+
+// --- Définition des Routes ---
+app.use('/api/auth', require('./routes/auth.routes'));
+app.use('/api/public/trajets', require('./routes/public/trajet.routes'));
+app.use('/api/public/colis', require('./routes/public/colis.routes'));
+app.use('/api/reservations', require('./routes/reservation.routes'));
+app.use('/api/payments/vitepay', require('./routes/vitepay.routes'));
+app.use('/api/dashboard', require('./routes/dashboard.routes.js'));
+app.use('/api/tracking', require('./routes/tracking.routes.js'));
+app.use('/api/admin/bus', require('./routes/admin/bus.routes'));
+app.use('/api/admin/chauffeurs', require('./routes/admin/chauffeur.routes'));
+app.use('/api/admin/trajets', require('./routes/admin/trajet.routes'));
+app.use('/api/admin/reservations', require('./routes/admin/reservation.routes'));
+app.use('/api/admin/colis', require('./routes/admin/colis.routes'));
+app.use('/api/admin/stats', require('./routes/admin/stats.routes'));
+app.use('/api/admin/paiements', require('./routes/admin/paiement.routes.js'));
+app.use('/api/admin/villes', require('./routes/admin/ville.routes'));
+
+// --- JOB D'AUTOMATISATION RETIRÉ ---
+// La section 'setInterval(updateColisStatuses, ...)' a été complètement supprimée.
+
+// --- Démarrage du serveur ---
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`🚀 Serveur démarré (HTTP & WebSocket) sur le port ${PORT}`);
+});
+
+
+// --- Gestion des Erreurs ---
+app.use((req, res, next) => {
+  const error = new Error(`Non trouvé - ${req.originalUrl}`);
+  res.status(404);
+  next(error);
+});
+app.use((err, req, res, next) => {
+  const statusCode = res.statusCode === 200 ? 500 : res.statusCode;
+  res.status(statusCode);
+  res.json({
+    message: err.message,
+    stack: process.env.NODE_ENV === 'production' ? null : err.stack,
+  });
+});
+package.json:
+{
+  "name": "back",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.9.0",
+    "bcryptjs": "^3.0.2",
+    "cinetpay-nodejs": "^1.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "express-validator": "^7.2.1",
+    "geolib": "^3.3.4",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.16.0",
+    "mongoose": "^8.15.1",
+    "morgan": "^1.10.0",
+    "socket.io": "^4.8.1"
+  }
+}
+seed.js : // backend/seed.js
+// Ce script nettoie et peuple les collections avec des données de test enrichies.
+
+require('dotenv').config();
+const mongoose = require('mongoose');
+const Trajet = require('./models/trajet.model');
+const Bus = require('./models/bus.model');
+const Reservation = require('./models/reservation.model');
+
+// --- LISTE DE VILLES ENRICHIE ---
+const CITIES_COORDS = {
+    'Bamako': { lat: 12.6392, lng: -8.0029 },
+    'Kayes': { lat: 14.4469, lng: -11.4443 },
+    'Koulikoro': { lat: 12.8628, lng: -7.5599 },
+    'Sikasso': { lat: 11.3176, lng: -5.6665 },
+    'Ségou': { lat: 13.4317, lng: -6.2658 },
+    'Mopti': { lat: 14.4944, lng: -4.1970 },
+    'Gao': { lat: 16.2666, lng: -0.0400 },
+    'Kidal': { lat: 18.4411, lng: 1.4078 },
+    'Koutiala': { lat: 12.3917, lng: -5.4642 },
+    'Kita': { lat: 13.0444, lng: -9.4895 },
+    'Bougouni': { lat: 11.4194, lng: -7.4817 },
+};
+
+
+
+const HEURES_DEPART = ['06:00', '07:30', '08:00', '09:30', '14:00', '16:00', '20:00', '21:00'];
+
+const seedDatabase = async () => {
+    const mongoURI = process.env.MONGODB_URI;
+    if (!mongoURI) {
+        console.error('❌ Erreur: MONGODB_URI n\'est pas défini dans .env');
+        process.exit(1);
+    }
+
+    try {
+        await mongoose.connect(mongoURI);
+        console.log('✅ Connecté à MongoDB');
+
+        console.log('Nettoyage des collections...');
+        await Trajet.deleteMany({});
+        await Bus.deleteMany({});
+        await Reservation.deleteMany({});
+        console.log('Collections nettoyées.');
+
+        console.log('Création de 15 bus de test...');
+        const busData = [];
+        for (let i = 1; i <= 15; i++) {
+            busData.push({
+                numero: `MYBUS-${200 + i}`,
+                etat: 'en service',
+                capacite: 50 + (i % 4 * 5) // Capacités: 50, 55, 60, 65
+            });
+        }
+        const createdBuses = await Bus.insertMany(busData);
+        console.log(`✅ ${createdBuses.length} bus créés.`);
+
+        console.log('Génération de 50 trajets entre aujourd\'hui et fin août...');
+        const trajetsToCreate = [];
+        const cityNames = Object.keys(CITIES_COORDS);
+        
+        const startDate = new Date();
+        const endDate = new Date(startDate.getFullYear(), 7, 31); // 31 Août
+        const diffTime = Math.abs(endDate - startDate);
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        for (let i = 0; i < 50; i++) { // Générer 50 trajets
+            let villeDepart = cityNames[Math.floor(Math.random() * cityNames.length)];
+            let villeArrivee = cityNames[Math.floor(Math.random() * cityNames.length)];
+            
+            while (villeDepart === villeArrivee) {
+                villeArrivee = cityNames[Math.floor(Math.random() * cityNames.length)];
+            }
+            
+            const randomDaysToAdd = Math.floor(Math.random() * diffDays);
+            const dateDepart = new Date();
+            dateDepart.setDate(dateDepart.getDate() + randomDaysToAdd);
+
+            const nouveauTrajet = {
+                villeDepart,
+                villeArrivee,
+                coordsDepart: CITIES_COORDS[villeDepart],
+                coordsArrivee: CITIES_COORDS[villeArrivee],
+                compagnie: COMPANIES[Math.floor(Math.random() * COMPANIES.length)],
+                dateDepart,
+                heureDepart: HEURES_DEPART[Math.floor(Math.random() * HEURES_DEPART.length)],
+                prix: (Math.floor(Math.random() * 25) + 5) * 1000, // Prix entre 5000 et 30000
+                placesDisponibles: 50,
+                bus: createdBuses[Math.floor(Math.random() * createdBuses.length)]._id,
+                isActive: true,
+            };
+            trajetsToCreate.push(nouveauTrajet);
+        }
+
+        await Trajet.insertMany(trajetsToCreate);
+        console.log(`✅ ${trajetsToCreate.length} trajets ont été créés avec succès.`);
+        console.log('Opération de seeding terminée.');
+
+    } catch (err) {
+        console.error("❌ Une erreur est survenue lors du seeding:", err);
+    } finally {
+        await mongoose.disconnect();
+        console.log('Connexion à MongoDB fermée.');
+    }
+};
+
+seedDatabase();

@@ -1,0 +1,59 @@
+@startuml
+' Titre du diagramme
+title Diagramme de Composants - MyBus Mali
+
+' Packages
+package "Navigateur Client" {
+  [Frontend (React)]
+}
+
+package "Serveur (Render.com)" {
+  [Backend (Node.js/Express)]
+}
+
+database "Base de Données (MongoDB Atlas)" as DB
+
+package "Services Externes" {
+  [API de Paiement (VitePay)] as VitePay
+  [API de Routage (OpenRouteService)] as ORS
+}
+
+' Composants du Frontend
+rectangle "Frontend (React)" {
+  component "Routeur (React Router)" as Router
+  component "Gestion d'État (AuthContext)" as State
+  component "Pages Publiques" as PublicPages
+  component "Dashboard Client" as ClientDashboard
+  component "Dashboard Admin" as AdminDashboard
+  component "Composants UI" as UI
+  
+  PublicPages ..> Router
+  ClientDashboard ..> Router
+  AdminDashboard ..> Router
+  State ..> Router
+  UI ..> PublicPages
+  UI ..> ClientDashboard
+  UI ..> AdminDashboard
+}
+
+' Composants du Backend
+rectangle "Backend (Node.js/Express)" {
+  component "Serveur Express" as Express
+  component "Routes API" as ApiRoutes
+  component "Contrôleurs" as Controllers
+  component "Modèles (Mongoose)" as Models
+  component "Middlewares" as Middlewares
+  
+  Express -> ApiRoutes
+  ApiRoutes -> Middlewares
+  Middlewares -> Controllers
+  Controllers -> Models
+}
+
+' Relations entre les composants majeurs
+[Frontend (React)] ..> [Backend (Node.js/Express)] : "Requêtes API (HTTPS)"
+[Backend (Node.js/Express)] ..> DB : "Lit/Écrit"
+[Backend (Node.js/Express)] ..> VitePay : "Requêtes de Paiement"
+[Backend (Node.js/Express)] ..> ORS : "Calcul d'itinéraire"
+
+@enduml

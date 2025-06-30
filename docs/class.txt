@@ -1,0 +1,135 @@
+@startuml
+' Titre: Diagramme de Classes Corrigé - MyBus Mali
+title Diagramme de Classes - MyBus Mali
+
+' Style
+skinparam class {
+  BackgroundColor #F8F9FA
+  ArrowColor #343A40
+  BorderColor #495057
+  FontColor #212529
+  HeaderBackgroundColor #E9ECEF
+}
+skinparam note {
+  BackgroundColor #FEFCBF
+  BorderColor #BDBB7A
+}
+hide empty members
+
+' --- Classe utilitaire pour les coordonnées ---
+class Point {
+  # lat: Number
+  # lng: Number
+}
+
+' --- Acteurs et Classes de Base ---
+class Client {
+  # _id: ObjectId
+  # nom: String
+  # prenom: String
+  # email: String
+  # mot_de_passe: String (haché)
+  # telephone: String
+  # role: String {"client", "admin"}
+  + login()
+  + register()
+  + matchPassword(): boolean
+}
+
+class Administrateur {
+  + gérerBus(bus: Bus)
+  + gérerTrajet(trajet: Trajet)
+  + gérerColis(colis: Colis)
+  + démarrerVoyage(trajet: Trajet)
+  + consulterStatistiques()
+}
+Administrateur --|> Client
+
+' --- Classes Métier ---
+class Trajet {
+  # _id: ObjectId
+  # villeDepart: String
+  # villeArrivee: String
+  # dateDepart: Date
+  # heureDepart: String
+  # prix: Number
+  # placesDisponibles: Number
+  # isActive: Boolean
+}
+
+class Bus {
+  # _id: ObjectId
+  # numero: String
+  # etat: String {"en service", "maintenance", ...}
+  # capacite: Number
+}
+
+class Chauffeur {
+  # _id: ObjectId
+  # nom: String
+  # prenom: String
+  # telephone: String
+}
+
+class Reservation {
+  # _id: ObjectId
+  # statut: String {"en_attente", "confirmée", ...}
+  # placesReservees: Number
+  # passagers: Array
+  # dateReservation: Date
+  + confirmer()
+  + annuler()
+}
+
+class Colis {
+  # _id: ObjectId
+  # code_suivi: String
+  # statut: String {"enregistré", "encours", ...}
+  # prix: Number
+  # description: String
+  # poids: Number
+  + mettreAJourStatut(nouveauStatut)
+}
+
+class LiveTrip {
+  # _id: ObjectId
+  # status: String {"En cours", "Terminé", ...}
+  # currentPosition: Point
+  # routeGeoJSON: Object
+  # routeSummary: Object
+  + mettreAJourPosition(coords: Point)
+  + calculerETA(): Date
+}
+LiveTrip : "Voyage en Direct"
+
+
+' --- Relations Structurelles Corrigées ---
+
+Client "1" -- "0..*" Reservation : effectue
+Reservation "0..*" -- "1" Trajet : concerne
+
+' Un bus peut effectuer plusieurs trajets, mais un trajet est assigné à un seul bus.
+Bus "1" -- "0..*" Trajet : effectue
+
+' Un bus est conduit par zéro ou un chauffeur à un instant T.
+Bus "1" -- "0..1" Chauffeur : conduit par
+
+' Un trajet planifié peut être suivi en tant que un unique voyage en direct.
+Trajet "1" -- "1" LiveTrip : est suivi en tant que
+
+' Un trajet contient deux points (départ et arrivée).
+Trajet "1" *-- "2" Point : définit
+
+' !! CORRECTION PRINCIPALE !!
+' Un trajet peut transporter plusieurs colis, chaque colis appartient à un seul trajet.
+Trajet "1" -- "0..*" Colis : transporte
+
+
+note left of Client
+  L'Administrateur hérite des propriétés
+  du Client (compte, email, etc.)
+  mais a des droits supplémentaires
+  (via le middleware `isAdmin`).
+end note
+
+@enduml

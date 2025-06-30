@@ -1,0 +1,52 @@
+@startuml
+' Titre: Diagramme de Séquence - Réservation de Billet
+title Diagramme de Séquence - Réservation de Billet
+
+actor Client
+participant "Frontend (React)" as FE
+participant "Backend (Node.js)" as BE
+participant "Base de Données (MongoDB)" as DB
+participant "API Paiement (VitePay)" as VitePay
+
+Client -> FE: Clique sur "Réserver" pour un trajet
+activate FE
+
+FE -> BE: POST /api/reservations\n(trajetId, passagers, contact)
+activate BE
+
+BE -> DB: Cherche le trajet et vérifie les places
+activate DB
+DB --> BE: Trajet trouvé
+deactivate DB
+
+BE -> DB: Crée un document Réservation (statut: "en_attente")\net met à jour les places du Trajet (Transaction)
+activate DB
+DB --> BE: Transaction OK
+deactivate DB
+
+BE -> VitePay: POST /payments (crée une session de paiement)
+activate VitePay
+VitePay --> BE: Renvoie une URL de paiement
+deactivate VitePay
+
+BE --> FE: Renvoie { checkoutUrl: "..." }
+deactivate BE
+
+FE -> Client: Redirige vers l'URL de paiement de VitePay
+deactivate FE
+
+Client -> VitePay: Effectue le paiement
+activate VitePay
+VitePay -> BE: Webhook POST /api/vitepay/callback (paiement confirmé)
+deactivate VitePay
+activate BE
+
+BE -> DB: Met à jour le statut de la Réservation à "confirmée"
+activate DB
+DB --> BE: Mise à jour OK
+deactivate DB
+
+BE --> VitePay: Répond 200 OK
+deactivate BE
+
+@enduml

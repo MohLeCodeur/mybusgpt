@@ -1,0 +1,43 @@
+@startuml
+' Titre du diagramme
+title Diagramme de Déploiement - MyBus Mali
+
+' Noeuds de déploiement (services cloud)
+cloud "Cloud Vercel" {
+  node "Serveur Vercel (CDN)" as VercelServer {
+    artifact "Frontend React (mybusfront)" as FrontendApp
+  }
+}
+
+cloud "Cloud Render.com" {
+  node "Serveur Node.js (Render)" as RenderServer {
+    artifact "Backend Express (mybusback)" as BackendApp
+    artifact ".env (variables)" as EnvFile
+  }
+}
+
+cloud "MongoDB Atlas" {
+  database "Cluster MongoDB" as MongoDB {
+    collections "Collections (trajets, users, etc.)" as Collections
+  }
+}
+
+cloud "Services Tiers" {
+    node "API VitePay" as VitePayAPI
+    node "API OpenRouteService" as ORS_API
+}
+
+
+' Relations de déploiement et de communication
+FrontendApp ..> BackendApp : "API Calls (HTTPS)"
+BackendApp -- RenderServer : est déployé sur >
+RenderServer -- EnvFile : utilise >
+
+BackendApp ..> MongoDB : "Mongoose Driver"
+BackendApp ..> VitePayAPI : "HTTPS"
+BackendApp ..> ORS_API : "HTTPS"
+
+actor "Utilisateur (Client/Admin)" as User
+User -->> FrontendApp : "Utilise via Navigateur"
+
+@enduml
